@@ -1,2 +1,2 @@
 nlforge: nlforge.c
-	$(CC) -lncurses -o $@ $<
+	$(CC) -ggdb3 -lncurses -o $@ $<

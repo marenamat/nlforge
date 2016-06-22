@@ -1,6 +1,6 @@
 #include <ncurses.h>
 
-char data[] = {
+static char data[] = {
   0xdb, 0x45, 0xfa, 0x34, 0x52, 0x86, 0x2f, 0x5b, 0x31, 0xec, 0x91, 0x92, 0xfc, 0x8a, 0x14, 0x8d,
   0xb7, 0xf3, 0xa8, 0xe7, 0xd4, 0x09, 0xbf, 0x05, 0xf9, 0x36, 0xd7, 0x8d, 0xe5, 0x5f, 0x06, 0x71,
   0xf0, 0x97, 0x8c, 0x0f, 0xab, 0x0f, 0x1a, 0x80, 0x01, 0x45, 0xa5, 0x07, 0x25, 0x85, 0xe2, 0x6d,
@@ -131,17 +131,20 @@ char data[] = {
   0x4b, 0xd1, 0x47, 0x9c, 0x77, 0xe5, 0xee, 0xbf, 0x57, 0x30, 0x65, 0xb1, 0xf9, 0x3e, 0xb9, 0x27,
 };
 
-int datasize = sizeof(data);
+static int datasize = sizeof(data);
 
 static WINDOW *hexwin;
 static WINDOW *statuswin;
 
-#define DEFAULT_COLOR_PAIR  1
-#define STATUS_COLOR_PAIR   2
+enum {
+  DEFAULT_COLOR_PAIR = 1,
+  STATUS_COLOR_PAIR,
+  CURSOR_COLOR_PAIR,
+};
 
-#define status(...) do { wclear(statuswin); wprintw(statuswin, __VA_ARGS__); wrefresh(statuswin); refresh(); } while(0);
+#define status(...) do { werase(statuswin); wprintw(statuswin, __VA_ARGS__); wrefresh(statuswin); refresh(); } while(0);
 
-void status_init()
+static void status_init()
 {
   statuswin = newwin(1, COLS, LINES-1, 0);
   if (has_colors()) {
@@ -151,36 +154,64 @@ void status_init()
   wrefresh(statuswin);
 }
 
-#define BYTES_PER_LINE	16
 static int hexwin_offset = 0;
-#define PGSKIP		16
+static int hexwin_cursor = 0;
 
-void hexwin_init(void)
+#define BYTES_PER_LINE		16
+#define BYTES_GROUP_BY		4
+#define HEXWIN_LINES		(LINES-5)
+#define PGSKIP			16
+#define BYTES_PER_SCREEN	(BYTES_PER_LINE*HEXWIN_LINES)
+
+static void hexwin_init(void)
 {
-  hexwin = newwin(LINES-3, BYTES_PER_LINE*3+1, 2, 0);
+  hexwin = newwin(HEXWIN_LINES+2, BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY, 2, 0);
   scrollok(hexwin, TRUE);
   idlok(hexwin, TRUE);
   box(hexwin, 0, 0);
   wrefresh(hexwin);
+
+  if (has_colors())
+    init_pair(CURSOR_COLOR_PAIR, COLOR_BLACK, COLOR_YELLOW);
 }
 
-void hexwin_redraw(void)
+static void hexwin_redraw(void)
 {
-  wclear(hexwin);
-  for(int i=hexwin_offset, y=0; i<datasize/BYTES_PER_LINE; i++, y++) {
-    if (y >= LINES-5)
+  werase(hexwin);
+  box(hexwin, 0, 0);
+  int y = 0;
+  for(int i=hexwin_offset; i<datasize/BYTES_PER_LINE; i++, y++) {
+    if (y >= HEXWIN_LINES)
       break;
     for (int j=0; j<BYTES_PER_LINE; j++) {
-      mvwprintw(hexwin, y+1, j*3+1, "%02x", (unsigned char) data[i*BYTES_PER_LINE + j]);
+      mvwprintw(hexwin, y+1, j*3+1 + j/BYTES_GROUP_BY, "%02x", (unsigned char) data[i*BYTES_PER_LINE + j]);
+      if (i*BYTES_PER_LINE + j == hexwin_cursor)
+	mvwchgat(hexwin, y+1, j*3+1 + j/BYTES_GROUP_BY, 2, 0, CURSOR_COLOR_PAIR, NULL);
     }
   }
+
   wrefresh(hexwin);
+}
+
+static void hexwin_scroll_to_cursor(void) {
+  while (hexwin_offset*BYTES_PER_LINE > hexwin_cursor)
+    hexwin_offset--;
+  while (hexwin_cursor - hexwin_offset*BYTES_PER_LINE >= BYTES_PER_SCREEN)
+    hexwin_offset++;
+}
+
+static void hexwin_cursor_to_scroll(void) {
+  while (hexwin_offset*BYTES_PER_LINE > hexwin_cursor)
+    hexwin_cursor += BYTES_PER_LINE;
+  while (hexwin_cursor - hexwin_offset*BYTES_PER_LINE >= BYTES_PER_SCREEN)
+    hexwin_cursor -= BYTES_PER_LINE;
 }
 
 int main(int argc, char **argv)
 {
   initscr();
   start_color();
+  curs_set(0);
   cbreak();
   noecho();
   
@@ -193,7 +224,7 @@ int main(int argc, char **argv)
 
   while (1) {
     int ch = getch();
-    status("Hit key: %x", ch);
+//    status("Hit key: %x", ch);
     switch(ch) {
       case 'q':
 	endwin();
@@ -202,19 +233,40 @@ int main(int argc, char **argv)
 	hexwin_offset -= PGSKIP;
 	if (hexwin_offset < 0)
 	  hexwin_offset = 0;
-	hexwin_redraw();
+	hexwin_cursor_to_scroll();
 	break;
       case KEY_NPAGE:
 	hexwin_offset += PGSKIP;
 	if (hexwin_offset >= datasize/BYTES_PER_LINE)
 	  hexwin_offset = datasize/BYTES_PER_LINE - 1;
-	hexwin_redraw();
+	hexwin_cursor_to_scroll();
 	break;
-      case 'x':
-	wprintw(hexwin, "Ahoj karle\n");
-	wrefresh(hexwin);
+      case KEY_LEFT:
+	hexwin_cursor--;
+	if (hexwin_cursor < 0)
+	  hexwin_cursor = 0;
+	hexwin_scroll_to_cursor();
+	break;
+      case KEY_RIGHT:
+	hexwin_cursor++;
+	if (hexwin_cursor >= datasize)
+	  hexwin_cursor = datasize-1;
+	hexwin_scroll_to_cursor();
+	break;
+      case KEY_UP:
+	hexwin_cursor -= BYTES_PER_LINE;
+	if (hexwin_cursor < 0)
+	  hexwin_cursor = 0;
+	hexwin_scroll_to_cursor();
+	break;
+      case KEY_DOWN:
+	hexwin_cursor += BYTES_PER_LINE;
+	if (hexwin_cursor >= datasize)
+	  hexwin_cursor = datasize - 1;
+	hexwin_scroll_to_cursor();
 	break;
     }
-    refresh();
+    hexwin_redraw();
+//    refresh();
   }
 }
