@@ -10,7 +10,8 @@
 
 #define BUFSIZESTEP 4096
 #define DATA_BUFFER 65536
-static char *data;
+typedef unsigned char u8;
+static u8 *data;
 static int datasize = 0;
 static int bufsize = 0;
 
@@ -86,8 +87,6 @@ static int hexwin_cursor = 0;
 static void hexwin_init(void)
 {
   hexwin = newwin(HEXWIN_LINES+2, BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY, 2, 0);
-  scrollok(hexwin, TRUE);
-  idlok(hexwin, TRUE);
   box(hexwin, 0, 0);
   wrefresh(hexwin);
 }
@@ -97,13 +96,17 @@ static void hexwin_redraw(void)
   werase(hexwin);
   box(hexwin, 0, 0);
   int y = 0;
-  for(int i=hexwin_offset; i<datasize/BYTES_PER_LINE; i++, y++) {
+  for(int i=hexwin_offset; i<datasize/BYTES_PER_LINE+1; i++, y++) {
     if (y >= HEXWIN_LINES)
       break;
     for (int j=0; j<BYTES_PER_LINE; j++) {
-      mvwprintw(hexwin, y+1, j*3+1 + j/BYTES_GROUP_BY, "%02x", (unsigned char) data[i*BYTES_PER_LINE + j]);
-      if (i*BYTES_PER_LINE + j == hexwin_cursor)
+      int rp = i*BYTES_PER_LINE + j;
+      if (rp < datasize)
+	mvwprintw(hexwin, y+1, j*3+1 + j/BYTES_GROUP_BY, "%02x", data[i*BYTES_PER_LINE + j]);
+      if (rp == hexwin_cursor)
 	mvwchgat(hexwin, y+1, j*3+1 + j/BYTES_GROUP_BY, 2, 0, CURSOR_COLOR_PAIR, NULL);
+      if (rp == datasize)
+	break;
     }
   }
 
@@ -161,7 +164,8 @@ static int xgetch(void) {
 static void save_data(void) {
   status("File name: ");
   char filename[256] = {};
-  const char *res = NULL;
+  char *res = NULL;
+  char resbuf[256];
   int fnpos = 0;
   curs_set(1);
 
@@ -174,13 +178,40 @@ static void save_data(void) {
       }
       filename[fnpos] = 0;
 
-      // TODO: really save the file
+      int fd = open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+      if (fd < 0) {
+	res = resbuf; sprintf(resbuf, "open: %m");
+	break;
+      }
+
+      int amount = write(fd, data, datasize);
+      if (amount < 0) {
+	res = resbuf; sprintf(resbuf, "write: %m");
+	break;
+      }
+
+      if (amount < datasize) {
+	res = "Write incomplete.";
+	break;
+      }
+
       break;
     }
+
+    if (ch == KEY_BACKSPACE) {
+      int x, y;
+      getyx(statuswin, y, x);
+      mvwdelch(statuswin, y, x-1);
+      wmove(statuswin, y, x-1);
+      wrefresh(statuswin);
+      fnpos--;
+    }
+
     if (ch >= 0x7f)
       continue;
 
     waddch(statuswin, ch);
+    wrefresh(statuswin);
     filename[fnpos++] = ch;
   }
 
@@ -206,7 +237,7 @@ int main(int argc, char **argv)
       return 1;
     }
 
-    char *tmp;
+    u8 *tmp;
     if ((tmp = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED) {
       perror("mmap");
       return 1;
@@ -243,8 +274,10 @@ int main(int argc, char **argv)
   while (1) {
     int ch = xgetch();
 //    status("Hit key: %x", ch);
+control:
     switch(ch) {
       case 'q':
+      case KEY_F(10):
 	endwin();
 	return 0;
       case KEY_PPAGE:
@@ -267,8 +300,8 @@ int main(int argc, char **argv)
 	break;
       case KEY_RIGHT:
 	hexwin_cursor++;
-	if (hexwin_cursor >= datasize)
-	  hexwin_cursor = datasize-1;
+	if (hexwin_cursor > datasize)
+	  hexwin_cursor = datasize;
 	hexwin_scroll_to_cursor();
 	break;
       case KEY_UP:
@@ -279,8 +312,8 @@ int main(int argc, char **argv)
 	break;
       case KEY_DOWN:
 	hexwin_cursor += BYTES_PER_LINE;
-	if (hexwin_cursor >= datasize)
-	  hexwin_cursor = datasize - 1;
+	if (hexwin_cursor > datasize)
+	  hexwin_cursor = datasize;
 	hexwin_scroll_to_cursor();
 	break;
       case KEY_F(1):
@@ -291,6 +324,53 @@ int main(int argc, char **argv)
 	save_data();
 	break;
     }
+
+    if (((ch >= '0') && (ch <= '9'))
+     || ((ch >= 'A') && (ch <= 'F'))
+     || ((ch >= 'a') && (ch <= 'f'))) {
+      int winpos = hexwin_cursor - hexwin_offset*BYTES_PER_LINE;
+      int winy = winpos / BYTES_PER_LINE + 1;
+      int winx = winpos % BYTES_PER_LINE; winx = winx*3+1 + winx/BYTES_GROUP_BY;
+
+      mvwaddch(hexwin, winy, winx, ch);
+
+      int val = 0;
+      if (ch <= '9')
+	val = (ch - '0') << 4;
+      else
+	val = ((ch & 0x1f) + 9) << 4;
+
+      debug("val is 0x%x", val);
+
+      ch = xgetch();
+
+      int go = 1;
+      if ((ch >= '0') && (ch <= '9')) {
+	val += (ch - '0');
+	go = 0;
+      } else if (((ch >= 'A') && (ch <= 'F')) || ((ch >= 'a') && (ch <= 'f'))) {
+	val += (ch & 0x1f) + 9;
+	go = 0;
+      }
+
+      debug("val is 0x%x, go is %d, datasize is %d", val, go, datasize);
+
+      if (hexwin_cursor == bufsize) {
+	u8 *tmp = malloc(bufsize * 2);
+	memcpy(tmp, data, bufsize);
+	free(data);
+	bufsize *= 2;
+      }
+
+      if (hexwin_cursor == datasize)
+	datasize++;
+
+      data[hexwin_cursor++] = val;
+
+      if (go)
+	goto control;
+    }
+
     hexwin_redraw();
 //    refresh();
   }
