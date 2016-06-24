@@ -167,41 +167,20 @@ static int xgetch(void) {
   return ch;
 }
 
-static void save_data(void) {
-  status("File name: ");
-  char filename[256] = {};
-  char *res = NULL;
-  char resbuf[256];
-  int fnpos = 0;
+static char *status_write(const char *msg) {
+  status(msg);
+  static char buf[256] = {};
+  int pos = 0;
   curs_set(1);
 
   while (1) {
     int ch = xgetch();
     if (ch == KEY_ENTER || ch == 0xa || ch == 0xd)  {
-      if (fnpos == 0) {
-	res = "Empty name";
+      if (pos == 0) {
 	break;
       }
-      filename[fnpos] = 0;
-
-      int fd = open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
-      if (fd < 0) {
-	res = resbuf; sprintf(resbuf, "open: %m");
-	break;
-      }
-
-      int amount = write(fd, data, datasize);
-      if (amount < 0) {
-	res = resbuf; sprintf(resbuf, "write: %m");
-	break;
-      }
-
-      if (amount < datasize) {
-	res = "Write incomplete.";
-	break;
-      }
-
-      break;
+      buf[pos] = 0;
+      return buf;
     }
 
     if (ch == KEY_BACKSPACE) {
@@ -210,7 +189,7 @@ static void save_data(void) {
       mvwdelch(statuswin, y, x-1);
       wmove(statuswin, y, x-1);
       wrefresh(statuswin);
-      fnpos--;
+      pos--;
     }
 
     if (ch >= 0x7f)
@@ -218,10 +197,40 @@ static void save_data(void) {
 
     waddch(statuswin, ch);
     wrefresh(statuswin);
-    filename[fnpos++] = ch;
+    buf[pos++] = ch;
   }
 
   curs_set(0);
+}
+
+static void save_data(void) {
+  char resbuf[256];
+  const char *res = NULL;
+  const char *filename = status_write("File name: ");
+
+  if (filename[0] == '\0') {
+    res = "Empty name";
+    goto fin;
+  }
+
+  int fd = open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+  if (fd < 0) {
+    res = resbuf; sprintf(resbuf, "open: %m");
+    goto fin;
+  }
+
+  int amount = write(fd, data, datasize);
+  if (amount < 0) {
+    res = resbuf; sprintf(resbuf, "write: %m");
+    goto fin;
+  }
+
+  if (amount < datasize) {
+    res = "Write incomplete.";
+    goto fin;
+  }
+
+fin:
   if (res)
     status("File not saved: %s", res);
   else
