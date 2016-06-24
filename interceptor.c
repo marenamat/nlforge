@@ -63,7 +63,7 @@ ssize_t send(int fd, const void *buf, size_t n, int flags) {
   D("Called send(fd=%d, buf=%p, n=%ju, flags=%x) = %jd\n", fd, buf, (uintmax_t) n, flags, (uintmax_t) out);
   dumpdata(buf, n);
   uint32_t size = n;
-  write(3, &size, 4);
+//  write(3, &size, 4);
   write(3, buf, n);
   return out;
 }
@@ -80,7 +80,7 @@ ssize_t sendmsg (int fd, const struct msghdr *msg, int flags) {
   for (int i=0; i<msg->msg_iovlen; i++)
     total += msg->msg_iov[i].iov_len;
 
-  write(3, &total, 4);
+//  write(3, &total, 4);
   for (int i=0; i<msg->msg_iovlen; i++)
     write(3, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
 
@@ -98,7 +98,7 @@ ssize_t recv(int fd, void *buf, size_t n, int flags) {
   D("Called recv(fd=%d, buf=%p, n=%ju, flags=%x) = %jd\n", fd, buf, (uintmax_t) n, flags, (uintmax_t) out);
   dumpdata(buf, out);
   uint32_t size = out | FLWR;
-  write(3, &size, 4);
+//  write(3, &size, 4);
   write(3, buf, out);
   return out;
 }
@@ -112,7 +112,7 @@ ssize_t recvmsg (int fd, struct msghdr *msg, int flags) {
   D("Called recvmsg(fd=%d, msg=%p, flags=%x) = %jd\n", fd, msg, flags, (uintmax_t) out);
   dumpmsg(msg);
   uint32_t size = out | FLWR;
-  write(3, &size, 4);
+//  write(3, &size, 4);
   write(3, msg->msg_iov[0].iov_base, out);
 
   return out;

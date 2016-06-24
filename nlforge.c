@@ -1,21 +1,33 @@
 //#define DEBUG
-
+#define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
+#include <linux/limits.h>
 #include <ncurses.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define BUFSIZESTEP 4096
-#define DATA_BUFFER 65536
+
 typedef unsigned char u8;
 static u8 *data;
 static int datasize = 0;
 static int bufsize = 0;
+
+static void data_realloc(void) {
+  u8 *tmp = malloc(bufsize * 2);
+  memcpy(tmp, data, bufsize);
+  free(data);
+  bufsize *= 2;
+  data = tmp;
+}
 
 static WINDOW *hexwin;
 static WINDOW *statuswin;
@@ -148,12 +160,12 @@ static void menu_init(void) {
   if (has_colors())
     wcolor_set(menuwin, MENU_COLOR_PAIR, NULL);
 
-  wprintw(menuwin, "F1 new file    F2 save file    F5 send to kernel    F10/q quit");
+  wprintw(menuwin, "F1 new file    F2 save file    F5 send to kernel    F8 intercept ip    F10/q quit");
   wrefresh(menuwin);
 }
 
 static void debug_init(void) {
-  debugwin = newwin(20, 60, 1, COLS-60);
+  debugwin = newwin(LINES, 60, 1, COLS-60);
   scrollok(debugwin, TRUE);
   idlok(debugwin, TRUE);
   if (has_colors())
@@ -179,6 +191,7 @@ static char *status_write(const char *msg) {
       if (pos == 0) {
 	break;
       }
+
       buf[pos] = 0;
       return buf;
     }
@@ -235,6 +248,176 @@ fin:
     status("File not saved: %s", res);
   else
     status("File saved as \"%s\"", filename);
+}
+
+static void intercept_ip(void) {
+  char *cmd = status_write("Command: ");
+
+  if (cmd[0] == '\0') {
+    status("Empty command");
+    return;
+  }
+
+  int fd_netlink[2];
+  int fd_output[2];
+  int fd_err[2];
+
+  if (pipe(fd_netlink) < 0) {
+    status("pipe: %m");
+    return;
+  }
+
+  if (pipe(fd_output) < 0) {
+    status("pipe: %m");
+    return;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    status("fork: %m");
+    return;
+  }
+
+  if (pid == 0) { // Child
+    close(fd_netlink[0]);
+    close(fd_output[0]);
+
+    char buf[256];
+
+    if (dup2(fd_netlink[1], 3) != 3) {
+      int n = sprintf(buf, "dup2: %m");
+      write(fd_output[1], buf, n);
+      exit(-1);
+    }
+
+    if (dup2(fd_output[1], 2) != 2) {
+      int n = sprintf(buf, "dup2: %m");
+      write(fd_output[1], buf, n);
+      exit(-1);
+    }
+
+    if (dup2(fd_output[1], 1) != 1) {
+      int n = sprintf(buf, "dup2: %m");
+      write(fd_output[1], buf, n);
+      exit(-1);
+    }
+
+    close(fd_netlink[1]);
+    close(fd_output[1]);
+
+#ifdef DEBUG
+    write(1, cmd, strlen(cmd));
+    write(1, "\n", 1);
+#endif
+
+    int N = 1;
+    for (const char *p = cmd; *p; p++)
+      if (*p == ' ')
+	for (N++; *p == ' '; p++);
+
+    char *argv[N+1];
+    argv[0] = cmd;
+    int nn = 1;
+
+    for (char *p = cmd; *p; p++)
+      if (*p == ' ') {
+	while (*p == ' ')
+	  *(p++) = 0;
+	argv[nn++] = p;
+      }
+
+#ifdef DEBUG
+    sprintf(buf, "arg num: %d\n", N);
+    write(1, buf, strlen(buf));
+    for (int i=0; i<N; i++) {
+      write(1, "arg: ", 5);
+      write(1, argv[i], strlen(argv[i]));
+      write(1, "ea\n", 3);
+    }
+#endif
+
+    argv[N] = NULL;
+    char ldp[PATH_MAX+30];
+    strcpy(ldp, "LD_PRELOAD=");
+    if (getcwd(ldp + strlen(ldp), PATH_MAX) == NULL) {
+      int n = sprintf(buf, "getcwd: %m");
+      write(1, buf, n);
+      exit(-1);
+    }
+
+    strcpy(ldp + strlen(ldp), "/interceptor.so");
+
+    if (putenv(ldp) != 0) {
+      int n = sprintf(buf, "putenv: %m");
+      write(1, buf, n);
+      exit(-1);
+    }
+
+    execvp(argv[0], argv);
+    int n = sprintf(buf, "exec: %m");
+    write(1, buf, n);
+    exit(-1);
+  }
+
+  close(fd_netlink[1]);
+  close(fd_output[1]);
+
+  struct pollfd pfd[2] = {
+    { .fd = fd_netlink[0], .events = POLLIN },
+    { .fd = fd_output[0], .events = POLLIN }
+  };
+
+  datasize = 0;
+
+  while (1) {
+    int e = poll(pfd, 2, -1);
+    if (e < 0) {
+      if (errno == EINTR)
+	continue;
+
+      status("poll: %m");
+      return;
+    }
+
+    if (e == 0)
+      continue;
+
+    if (pfd[0].revents & POLLIN) {
+      int n = read(fd_netlink[0], data + datasize, bufsize - datasize);
+      if (n < 0) {
+	status("read: %m");
+	return;
+      }
+
+      debug("read netlink: %d", n);
+      datasize += n;
+      if (datasize == bufsize)
+	data_realloc();
+    }
+
+    if (pfd[1].revents & POLLIN) {
+      char buf[4096];
+      int n = read(fd_output[0], buf, 4096);
+      debug("read output: %d", n);
+      debug("output: %*s", n, buf);
+      if (n < 0) {
+	status("read: %m");
+	return;
+      }
+    }
+
+    if ((pfd[0].revents & ~POLLIN) && (pfd[1].revents & ~POLLIN)) {
+      debug("revents: %x %x", pfd[0].revents, pfd[1].revents);
+      break;
+    }
+  }
+
+  status("Waiting for command to finish");
+  int wstatus;
+  while (waitpid(pid, &wstatus, 0) < 0);
+
+  status("Command done.");
+  hexwin_redraw();
 }
 
 int main(int argc, char **argv)
@@ -340,6 +523,9 @@ control:
       case KEY_F(2):
 	save_data();
 	break;
+      case KEY_F(8):
+	intercept_ip();
+	break;
     }
 
     if (((ch >= '0') && (ch <= '9'))
@@ -373,12 +559,8 @@ control:
 
       debug("val is 0x%x, go is %d, datasize is %d", val, go, datasize);
 
-      if (hexwin_cursor == bufsize) {
-	u8 *tmp = malloc(bufsize * 2);
-	memcpy(tmp, data, bufsize);
-	free(data);
-	bufsize *= 2;
-      }
+      if (hexwin_cursor == bufsize)
+	data_realloc();
 
       if (hexwin_cursor == datasize)
 	datasize++;
