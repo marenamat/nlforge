@@ -1,3 +1,5 @@
+//#define DEBUG
+
 #include <fcntl.h>
 #include <ncurses.h>
 #include <stdio.h>
@@ -65,7 +67,11 @@ static void color_init()
 }
 
 #define status(...) do { werase(statuswin); wprintw(statuswin, __VA_ARGS__); wrefresh(statuswin); refresh(); } while(0)
+#ifdef DEBUG
 #define debug(...) do { wprintw(debugwin, __VA_ARGS__); wprintw(debugwin, "\n"); wrefresh(debugwin); refresh(); } while(0)
+#else
+#define debug(...) do { __VA_ARGS__; } while (0)
+#endif
 
 static void status_init()
 {
@@ -265,7 +271,9 @@ int main(int argc, char **argv)
 
   color_init();
 
+#ifdef DEBUG
   debug_init();
+#endif
   menu_init();
   status_init();
   hexwin_init();
@@ -332,7 +340,8 @@ control:
       int winy = winpos / BYTES_PER_LINE + 1;
       int winx = winpos % BYTES_PER_LINE; winx = winx*3+1 + winx/BYTES_GROUP_BY;
 
-      mvwaddch(hexwin, winy, winx, ch);
+      mvwaddch(hexwin, winy, winx, ch | COLOR_PAIR(CURSOR_COLOR_PAIR) | A_BOLD);
+      wrefresh(hexwin);
 
       int val = 0;
       if (ch <= '9')
