@@ -1,10 +1,16 @@
-//#define DEBUG
+#define DEBUG
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fib_rules.h>
+#include <linux/if_addr.h>
+#include <linux/if_link.h>
 #include <linux/limits.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <ncurses.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +22,8 @@
 
 #define BUFSIZESTEP 4096
 
-typedef unsigned char u8;
+typedef uint8_t u8;
+typedef uint32_t u32;
 static u8 *data;
 static int datasize = 0;
 static int bufsize = 0;
@@ -29,7 +36,39 @@ static void data_realloc(void) {
   data = tmp;
 }
 
+static struct p {
+  struct nlmsghdr *h;
+  int begin, payload, end;
+  union {
+    struct { // RTM_*LINK
+      struct ifinfomsg *link;
+    };
+    struct { // RTM_*ADDR
+      struct ifaddrmsg *addr;
+    };
+    struct { // RTM_*ROUTE
+      struct rtmsg *rt;
+    };
+    struct { // RTM_*NEIGH
+      struct ndmsg *neigh;
+    };
+    struct { // RTM_*RULE
+      struct fib_rule_hdr *rule;
+    };
+    struct { // RTM_*NEIGHTBL
+      struct ndtmst *ndt;
+    };
+  };
+} *parsed;
+
+#define PARSED_ALLOC_STEP 64
+
+int parsed_cnt = 0, parsed_max = 0;
+
+#include "nlstrings.h"
+
 static WINDOW *hexwin;
+static WINDOW *parsewin;
 static WINDOW *statuswin;
 static WINDOW *menuwin;
 static WINDOW *debugwin;
@@ -38,6 +77,7 @@ static WINDOW *debugwin;
   C(DEFAULT, COLOR_WHITE, COLOR_BLACK, 1000, 1000, 1000, 0, 0, 0) \
   C(STATUS, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 700) \
   C(CURSOR, COLOR_BLACK, COLOR_YELLOW, 0, 0, 0, 1000, 1000, 700) \
+  C(PH1, COLOR_BLACK, COLOR_GREEN, 0, 0, 0, 700, 1000, 700) \
   C(MENU, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 700) \
   C(DEBUG, COLOR_WHITE, COLOR_RED, 0, 0, 300, 1000, 700, 700) \
 
@@ -155,6 +195,116 @@ static void hexwin_cursor_to_scroll(void) {
     hexwin_cursor -= BYTES_PER_LINE;
 }
 
+static void parse_init(void) {
+  parsewin = newwin(LINES-20, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 2), 1, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 1));
+  wrefresh(parsewin);
+}
+
+static void parse(void) {
+  free(parsed);
+  parsed = malloc(sizeof(*parsed) * PARSED_ALLOC_STEP);
+  parsed_cnt = 0;
+  parsed_max = PARSED_ALLOC_STEP;
+
+  werase(parsewin);
+
+  for (int i = 0; i < datasize; ) {
+    parsed[parsed_cnt].h = (void *)(data + i);
+    struct p *p = &(parsed[parsed_cnt]);
+    p->begin = i;
+    p->payload = p->begin + ((u8 *)NLMSG_DATA(p->h) - (data + i));
+    p->end = p->begin + NLMSG_ALIGN(p->h->nlmsg_len);
+
+    int in_header = (hexwin_cursor < p->payload) && (hexwin_cursor >= p->begin);
+    int in_data = (hexwin_cursor < p->end) && (hexwin_cursor >= p->payload);
+
+    if (in_header || in_data)
+      wcolor_set(parsewin, PH1_COLOR_PAIR, NULL);
+
+    wprintw(parsewin, "nlmsghdr: nlmsg_len = %u, nlmsg_type = %u (%s), nlmsg_flags = %s\n",
+	p->h->nlmsg_len, p->h->nlmsg_type, nlmsg_type_string[p->h->nlmsg_type],
+	strflags(p->h->nlmsg_flags, (p->h->nlmsg_type & 0x1) ? nlmsg_flags_string_basic
+	  : ((p->h->nlmsg_type & 0x2) ? nlmsg_flags_string_get : nlmsg_flags_string_new)));
+
+    wcolor_set(parsewin, DEFAULT_COLOR_PAIR, NULL);
+
+    switch (p->h->nlmsg_type) {
+      case NLMSG_NOOP:
+      case NLMSG_ERROR:
+      case NLMSG_DONE:
+      case NLMSG_OVERRUN:
+	break;
+      case RTM_NEWLINK:
+      case RTM_DELLINK:
+      case RTM_GETLINK:
+      case RTM_SETLINK:
+	p->link = NLMSG_DATA(p->h);
+	break;
+      case RTM_NEWADDR:
+      case RTM_DELADDR:
+      case RTM_GETADDR:
+	p->addr = NLMSG_DATA(p->h);
+	break;
+      case RTM_NEWROUTE:
+      case RTM_DELROUTE:
+      case RTM_GETROUTE:
+	p->rt = NLMSG_DATA(p->h);
+	break;
+      case RTM_NEWNEIGH:
+      case RTM_DELNEIGH:
+      case RTM_GETNEIGH:
+	p->neigh = NLMSG_DATA(p->h);
+	break;
+      case RTM_NEWRULE:
+      case RTM_DELRULE:
+      case RTM_GETRULE:
+	p->rule = NLMSG_DATA(p->h);
+	break;
+      case RTM_NEWQDISC:
+      case RTM_DELQDISC:
+      case RTM_GETQDISC:
+      case RTM_NEWTCLASS:
+      case RTM_DELTCLASS:
+      case RTM_GETTCLASS:
+      case RTM_NEWTFILTER:
+      case RTM_DELTFILTER:
+      case RTM_GETTFILTER:
+      case RTM_NEWACTION:
+      case RTM_DELACTION:
+      case RTM_GETACTION:
+      case RTM_NEWPREFIX:
+      case RTM_GETMULTICAST:
+      case RTM_GETANYCAST:
+	break;
+      case RTM_NEWNEIGHTBL:
+      case RTM_GETNEIGHTBL:
+      case RTM_SETNEIGHTBL:
+	p->ndt = NLMSG_DATA(p->h);
+	break;
+      case RTM_NEWNDUSEROPT:
+      case RTM_NEWADDRLABEL:
+      case RTM_DELADDRLABEL:
+      case RTM_GETADDRLABEL:
+      case RTM_GETDCB:
+      case RTM_SETDCB:
+      case RTM_NEWNETCONF:
+      case RTM_GETNETCONF:
+      case RTM_NEWMDB:
+      case RTM_DELMDB:
+      case RTM_GETMDB:
+      case RTM_NEWNSID:
+      case RTM_DELNSID:
+      case RTM_GETNSID:
+	break;
+      default:
+	debug("Unknown nlmsg type: %u", p->h->nlmsg_type);
+    }
+
+    i = p->end;
+  }
+  wrefresh(parsewin);
+}
+
 static void menu_init(void) {
   menuwin = newwin(1, COLS, 0, 0);
   if (has_colors())
@@ -165,7 +315,7 @@ static void menu_init(void) {
 }
 
 static void debug_init(void) {
-  debugwin = newwin(LINES, 60, 1, COLS-60);
+  debugwin = newwin(LINES-2, 60, 1, COLS-60);
   scrollok(debugwin, TRUE);
   idlok(debugwin, TRUE);
   if (has_colors())
@@ -469,9 +619,11 @@ int main(int argc, char **argv)
   menu_init();
   status_init();
   hexwin_init();
-  hexwin_redraw();
+  parse_init();
 
   while (1) {
+    hexwin_redraw();
+    parse();
     int ch = xgetch();
 //    status("Hit key: %x", ch);
 control:
@@ -570,8 +722,5 @@ control:
       if (go)
 	goto control;
     }
-
-    hexwin_redraw();
-//    refresh();
   }
 }
