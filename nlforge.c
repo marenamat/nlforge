@@ -1,4 +1,4 @@
-#define DEBUG
+//#define DEBUG
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -58,6 +59,9 @@ static struct p {
     struct { // RTM_*NEIGHTBL
       struct ndtmst *ndt;
     };
+    struct {
+      void *data;
+    };
   };
 } *parsed;
 
@@ -79,6 +83,7 @@ static WINDOW *debugwin;
   C(CURSOR, COLOR_BLACK, COLOR_YELLOW, 0, 0, 0, 1000, 1000, 700) \
   C(PHF, COLOR_BLUE, COLOR_WHITE, 0, 700, 0, 1000, 1000, 1000) \
   C(PH1, COLOR_BLACK, COLOR_GREEN, 0, 0, 0, 700, 1000, 700) \
+  C(PH2, COLOR_WHITE, COLOR_BLUE, 0, 0, 0, 700, 700, 1000) \
   C(MENU, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 700) \
   C(DEBUG, COLOR_WHITE, COLOR_RED, 0, 0, 300, 1000, 700, 700) \
 
@@ -215,6 +220,8 @@ static void parse_init(void) {
       wprintw(parsewin, #field " = " format, __VA_ARGS__); \
     } \
   } while (0)
+#define papru(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u", parent->field)
+#define papren(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u (%s)", parent->field, field##_string[parent->field])
 
 #define paprc wprintw(parsewin, ", ")
 #define papre wprintw(parsewin, "\n")
@@ -255,78 +262,94 @@ static void parse(void) {
 	: ((p->h->nlmsg_type & 0x2) ? nlmsg_flags_string_get : nlmsg_flags_string_new)));
     papre;
 
+    header_color = DEFAULT_COLOR_PAIR;
     wcolor_set(parsewin, DEFAULT_COLOR_PAIR, NULL);
 
-    switch (p->h->nlmsg_type) {
-      case NLMSG_NOOP:
-      case NLMSG_ERROR:
-      case NLMSG_DONE:
-      case NLMSG_OVERRUN:
-	break;
-      case RTM_NEWLINK:
-      case RTM_DELLINK:
-      case RTM_GETLINK:
-      case RTM_SETLINK:
-	p->link = NLMSG_DATA(p->h);
-	break;
-      case RTM_NEWADDR:
-      case RTM_DELADDR:
-      case RTM_GETADDR:
-	p->addr = NLMSG_DATA(p->h);
-	break;
-      case RTM_NEWROUTE:
-      case RTM_DELROUTE:
-      case RTM_GETROUTE:
-	p->rt = NLMSG_DATA(p->h);
-	break;
-      case RTM_NEWNEIGH:
-      case RTM_DELNEIGH:
-      case RTM_GETNEIGH:
-	p->neigh = NLMSG_DATA(p->h);
-	break;
-      case RTM_NEWRULE:
-      case RTM_DELRULE:
-      case RTM_GETRULE:
-	p->rule = NLMSG_DATA(p->h);
-	break;
-      case RTM_NEWQDISC:
-      case RTM_DELQDISC:
-      case RTM_GETQDISC:
-      case RTM_NEWTCLASS:
-      case RTM_DELTCLASS:
-      case RTM_GETTCLASS:
-      case RTM_NEWTFILTER:
-      case RTM_DELTFILTER:
-      case RTM_GETTFILTER:
-      case RTM_NEWACTION:
-      case RTM_DELACTION:
-      case RTM_GETACTION:
-      case RTM_NEWPREFIX:
-      case RTM_GETMULTICAST:
-      case RTM_GETANYCAST:
-	break;
-      case RTM_NEWNEIGHTBL:
-      case RTM_GETNEIGHTBL:
-      case RTM_SETNEIGHTBL:
-	p->ndt = NLMSG_DATA(p->h);
-	break;
-      case RTM_NEWNDUSEROPT:
-      case RTM_NEWADDRLABEL:
-      case RTM_DELADDRLABEL:
-      case RTM_GETADDRLABEL:
-      case RTM_GETDCB:
-      case RTM_SETDCB:
-      case RTM_NEWNETCONF:
-      case RTM_GETNETCONF:
-      case RTM_NEWMDB:
-      case RTM_DELMDB:
-      case RTM_GETMDB:
-      case RTM_NEWNSID:
-      case RTM_DELNSID:
-      case RTM_GETNSID:
-	break;
-      default:
-	debug("Unknown nlmsg type: %u", p->h->nlmsg_type);
+    if (in_data) {
+      p->data = NLMSG_DATA(p->h);
+      switch (p->h->nlmsg_type) {
+	case NLMSG_NOOP:
+	case NLMSG_ERROR:
+	case NLMSG_DONE:
+	case NLMSG_OVERRUN:
+	case RTM_NEWLINK:
+	case RTM_DELLINK:
+	case RTM_GETLINK:
+	case RTM_SETLINK:
+	case RTM_NEWADDR:
+	case RTM_DELADDR:
+	case RTM_GETADDR:
+	  break;
+	case RTM_NEWROUTE:
+	case RTM_DELROUTE:
+	case RTM_GETROUTE:
+	  {
+	    int in_header = (hexwin_cursor < ((u8*)RTM_RTA(p->rt) - data));
+	    int in_data = (hexwin_cursor >= ((u8*)RTM_RTA(p->rt) - data));
+
+	    papren(p->payload, p->rt, rtm_family);
+	    paprc;
+	    papru(p->payload, p->rt, rtm_dst_len);
+	    paprc;
+	    papru(p->payload, p->rt, rtm_src_len);
+	    paprc;
+	    papru(p->payload, p->rt, rtm_tos);
+	    paprc;
+	    papre;
+	    papru(p->payload, p->rt, rtm_table);
+	    paprc;
+	    papren(p->payload, p->rt, rtm_protocol);
+	    paprc;
+	    papren(p->payload, p->rt, rtm_scope);
+	    paprc;
+	    papren(p->payload, p->rt, rtm_type);
+	    papre;
+	    papre;
+
+	    break;
+	  }
+	case RTM_NEWNEIGH:
+	case RTM_DELNEIGH:
+	case RTM_GETNEIGH:
+	case RTM_NEWRULE:
+	case RTM_DELRULE:
+	case RTM_GETRULE:
+	case RTM_NEWQDISC:
+	case RTM_DELQDISC:
+	case RTM_GETQDISC:
+	case RTM_NEWTCLASS:
+	case RTM_DELTCLASS:
+	case RTM_GETTCLASS:
+	case RTM_NEWTFILTER:
+	case RTM_DELTFILTER:
+	case RTM_GETTFILTER:
+	case RTM_NEWACTION:
+	case RTM_DELACTION:
+	case RTM_GETACTION:
+	case RTM_NEWPREFIX:
+	case RTM_GETMULTICAST:
+	case RTM_GETANYCAST:
+	case RTM_NEWNEIGHTBL:
+	case RTM_GETNEIGHTBL:
+	case RTM_SETNEIGHTBL:
+	case RTM_NEWNDUSEROPT:
+	case RTM_NEWADDRLABEL:
+	case RTM_DELADDRLABEL:
+	case RTM_GETADDRLABEL:
+	case RTM_GETDCB:
+	case RTM_SETDCB:
+	case RTM_NEWNETCONF:
+	case RTM_GETNETCONF:
+	case RTM_NEWMDB:
+	case RTM_DELMDB:
+	case RTM_GETMDB:
+	case RTM_NEWNSID:
+	case RTM_DELNSID:
+	case RTM_GETNSID:
+	  break;
+	default:
+	  debug("Unknown nlmsg type: %u", p->h->nlmsg_type);
+      }
     }
 
     i = p->end;
