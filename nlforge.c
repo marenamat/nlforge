@@ -77,6 +77,7 @@ static WINDOW *debugwin;
   C(DEFAULT, COLOR_WHITE, COLOR_BLACK, 1000, 1000, 1000, 0, 0, 0) \
   C(STATUS, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 700) \
   C(CURSOR, COLOR_BLACK, COLOR_YELLOW, 0, 0, 0, 1000, 1000, 700) \
+  C(PHF, COLOR_BLUE, COLOR_WHITE, 0, 700, 0, 1000, 1000, 1000) \
   C(PH1, COLOR_BLACK, COLOR_GREEN, 0, 0, 0, 700, 1000, 700) \
   C(MENU, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 700) \
   C(DEBUG, COLOR_WHITE, COLOR_RED, 0, 0, 300, 1000, 700, 700) \
@@ -196,9 +197,27 @@ static void hexwin_cursor_to_scroll(void) {
 }
 
 static void parse_init(void) {
-  parsewin = newwin(LINES-20, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 2), 1, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 1));
+  parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 2), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 1));
   wrefresh(parsewin);
 }
+
+#define isat(begin, type, field) \
+     ((hexwin_cursor >= (begin + offsetof(type, field))) \
+   && (hexwin_cursor < begin + offsetof(type, field) + sizeof(((type *) NULL)->field)))
+
+#define papr(begin, type, field, format, ...) \
+  do { \
+    if (isat(begin, type, field)) { \
+      wcolor_set(parsewin, PHF_COLOR_PAIR, NULL); \
+      wprintw(parsewin, #field " = " format, __VA_ARGS__); \
+      wcolor_set(parsewin, header_color, NULL); \
+    } else { \
+      wprintw(parsewin, #field " = " format, __VA_ARGS__); \
+    } \
+  } while (0)
+
+#define paprc wprintw(parsewin, ", ")
+#define papre wprintw(parsewin, "\n")
 
 static void parse(void) {
   free(parsed);
@@ -218,13 +237,23 @@ static void parse(void) {
     int in_header = (hexwin_cursor < p->payload) && (hexwin_cursor >= p->begin);
     int in_data = (hexwin_cursor < p->end) && (hexwin_cursor >= p->payload);
 
-    if (in_header || in_data)
-      wcolor_set(parsewin, PH1_COLOR_PAIR, NULL);
+    short header_color = DEFAULT_COLOR_PAIR;
 
-    wprintw(parsewin, "nlmsghdr: nlmsg_len = %u, nlmsg_type = %u (%s), nlmsg_flags = %s\n",
-	p->h->nlmsg_len, p->h->nlmsg_type, nlmsg_type_string[p->h->nlmsg_type],
-	strflags(p->h->nlmsg_flags, (p->h->nlmsg_type & 0x1) ? nlmsg_flags_string_basic
-	  : ((p->h->nlmsg_type & 0x2) ? nlmsg_flags_string_get : nlmsg_flags_string_new)));
+    if (in_header || in_data)
+      header_color = PH1_COLOR_PAIR;
+
+    wcolor_set(parsewin, header_color, NULL);
+    wprintw(parsewin, "nlmsghdr: ");
+
+    papr(p->begin, struct nlmsghdr, nlmsg_len, "%u", p->h->nlmsg_len);
+    paprc;
+    papr(p->begin, struct nlmsghdr, nlmsg_type, "%u (%s)",
+      p->h->nlmsg_type, nlmsg_type_string[p->h->nlmsg_type]);
+    paprc;
+    papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s",
+      strflags(p->h->nlmsg_flags, (p->h->nlmsg_type & 0x1) ? nlmsg_flags_string_basic
+	: ((p->h->nlmsg_type & 0x2) ? nlmsg_flags_string_get : nlmsg_flags_string_new)));
+    papre;
 
     wcolor_set(parsewin, DEFAULT_COLOR_PAIR, NULL);
 
