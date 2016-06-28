@@ -225,7 +225,7 @@ static void parse_init(void) {
   } while (0)
 #define papru(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u", parent->field)
 #define paprx(begin, parent, field) papr(begin, typeof(*(parent)), field, "0x%x", parent->field)
-#define papren(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u (%s)", parent->field, field##_string[parent->field])
+#define papren(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u (%s)", parent->field, parent->field >= (sizeof(field##_string)/sizeof(*field##_string)) ? "out of scope" : field##_string[parent->field])
 #define paprf(begin, parent, field) papr(begin, typeof(*(parent)), field, "%s", strflags(parent->field, field##_string))
 
 #define paprc wprintw(parsewin, ", ")
@@ -263,9 +263,12 @@ static void parse(void) {
     paprc;
     papren(p->begin, p->h, nlmsg_type);
     paprc;
-    papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s",
-      strflags(p->h->nlmsg_flags, (p->h->nlmsg_type & 0x1) ? nlmsg_flags_string_basic
-	: ((p->h->nlmsg_type & 0x2) ? nlmsg_flags_string_get : nlmsg_flags_string_new)));
+    if (p->h->nlmsg_type & 0x1)
+      papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s", strflags(p->h->nlmsg_flags, nlmsg_flags_string_basic));
+    else if (p->h->nlmsg_type & 0x2)
+      papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s", strflags(p->h->nlmsg_flags, nlmsg_flags_string_get));
+    else
+      papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s", strflags(p->h->nlmsg_flags, nlmsg_flags_string_new));
     papre;
     paprx(p->begin, p->h, nlmsg_seq);
     paprc;
@@ -547,6 +550,33 @@ fin:
     status("File saved as \"%s\"", filename);
 }
 
+static void send_to_kernel(void) {
+  int sk = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+  if (sk < 0) {
+    status("socket: %m");
+    return;
+  }
+
+  for (int pos = 0; pos < datasize; ) {
+    ssize_t sz = send(sk, data + pos, datasize - pos, 0);
+    if (sz < 0) {
+      status("send: %m");
+      return;
+    }
+    pos += sz;
+  }
+
+  if (bufsize - datasize < 1024)
+    data_realloc();
+
+  ssize_t sz = recv(sk, data + datasize, bufsize - datasize, 0);
+  if (sz < 0) {
+    status("recv: %m");
+    return;
+  }
+  datasize += sz;
+}
+
 static void intercept_ip(void) {
   char *cmd = status_write("Command: ");
 
@@ -821,6 +851,9 @@ control:
 	break;
       case KEY_F(2):
 	save_data();
+	break;
+      case KEY_F(5):
+	send_to_kernel();
 	break;
       case KEY_F(8):
 	intercept_ip();
