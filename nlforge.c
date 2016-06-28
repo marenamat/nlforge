@@ -1,5 +1,6 @@
 //#define DEBUG
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fib_rules.h>
@@ -24,7 +25,9 @@
 #define BUFSIZESTEP 4096
 
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
 static u8 *data;
 static int datasize = 0;
 static int bufsize = 0;
@@ -202,7 +205,7 @@ static void hexwin_cursor_to_scroll(void) {
 }
 
 static void parse_init(void) {
-  parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 2), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 1));
+  parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 4), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 3));
   wrefresh(parsewin);
 }
 
@@ -225,6 +228,8 @@ static void parse_init(void) {
 
 #define paprc wprintw(parsewin, ", ")
 #define papre wprintw(parsewin, "\n")
+
+#define paprindent(n) for (int i=0; i<2*n; i++) waddch(parsewin, ' ');
 
 static void parse(void) {
   free(parsed);
@@ -284,9 +289,13 @@ static void parse(void) {
 	case RTM_DELROUTE:
 	case RTM_GETROUTE:
 	  {
-	    int in_header = (hexwin_cursor < ((u8*)RTM_RTA(p->rt) - data));
-	    int in_data = (hexwin_cursor >= ((u8*)RTM_RTA(p->rt) - data));
+	    struct rtattr *a = RTM_RTA(p->rt);
+	    int apos = ((u8*)a - data);
+	    int alen = p->end - apos;
+	    int in_header = ((hexwin_cursor < apos) && (hexwin_cursor >= p->payload));
+	    int in_data = ((hexwin_cursor >= apos) && (hexwin_cursor < p->end));
 
+	    paprindent(1);
 	    papren(p->payload, p->rt, rtm_family);
 	    paprc;
 	    papru(p->payload, p->rt, rtm_dst_len);
@@ -296,6 +305,7 @@ static void parse(void) {
 	    papru(p->payload, p->rt, rtm_tos);
 	    paprc;
 	    papre;
+	    paprindent(1);
 	    papru(p->payload, p->rt, rtm_table);
 	    paprc;
 	    papren(p->payload, p->rt, rtm_protocol);
@@ -306,6 +316,84 @@ static void parse(void) {
 	    papre;
 	    papre;
 
+	    for ( ; RTA_OK(a, alen); a = RTA_NEXT(a, alen)) {
+	      int apos = ((u8*)a - data);
+
+	      paprindent(2);
+	      papru(apos, a, rta_len);
+	      paprc;
+	      papren(apos, a, rta_type);
+	      papre;
+
+	      paprindent(3);
+	      wprintw(parsewin, "Value: ");
+	      switch (a->rta_type) {
+		case RTA_UNSPEC:
+		  break;
+		case RTA_DST:
+		case RTA_SRC:
+		case RTA_GATEWAY:
+		case RTA_PREFSRC:
+		  switch (p->rt->rtm_family) {
+		    case AF_INET:
+		    case AF_INET6:
+		      {
+			char buf[128];
+			if (inet_ntop(p->rt->rtm_family, RTA_DATA(a), buf, 128) == NULL) {
+			  status("inet_ntop: %m");
+			  return;
+			}
+			wprintw(parsewin, "%s", buf);
+		      }
+		      break;
+		    default:
+		      wprintw(parsewin, "Display of %s addresses not implemented yet.",
+			  af_string[p->rt->rtm_family]);
+		  }
+		  break;
+		case RTA_IIF:
+		case RTA_OIF:
+		case RTA_PRIORITY:
+		case RTA_TABLE:
+		case RTA_MARK:
+		case RTA_FLOW:
+		case RTA_PREF:
+		case RTA_ENCAP_TYPE:
+		case RTA_EXPIRES:
+		  switch (RTA_PAYLOAD(a)) {
+		    case 1:
+		      wprintw(parsewin, "%u (8bit)", *((u8 *) RTA_DATA(a)));
+		      break;
+		    case 2:
+		      wprintw(parsewin, "%u (16bit)", *((u16 *) RTA_DATA(a)));
+		      break;
+		    case 4:
+		      wprintw(parsewin, "%u (32bit)", *((u32 *) RTA_DATA(a)));
+		      break;
+		    case 8:
+		      wprintw(parsewin, "%llu (64bit)", *((u64 *) RTA_DATA(a)));
+		      break;
+		    default:
+		      wprintw(parsewin, "?? (payload length %d)", RTA_PAYLOAD(a));
+		  }
+		  break;
+		case RTA_METRICS: // nested
+		case RTA_MULTIPATH: // struct rtnexthop
+		case RTA_CACHEINFO: // struct rta_cacheinfo
+		case RTA_MFC_STATS: // struct rta_mfc_stats
+		case RTA_VIA: // struct rtvia
+		case RTA_NEWDST: // MLPS label stack
+		case RTA_ENCAP: // nested
+		  wprintw(parsewin, "not supported yet");
+		  break;
+		case RTA_PROTOINFO: // no longer used
+		case RTA_SESSION: // no longer used
+		case RTA_MP_ALGO: // no longer used
+		  wprintw(parsewin, "no longer used");
+		  break;
+	      }
+	      papre;
+	    }
 	    break;
 	  }
 	case RTM_NEWNEIGH:
