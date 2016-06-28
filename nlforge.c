@@ -224,7 +224,9 @@ static void parse_init(void) {
     } \
   } while (0)
 #define papru(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u", parent->field)
+#define paprx(begin, parent, field) papr(begin, typeof(*(parent)), field, "0x%x", parent->field)
 #define papren(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u (%s)", parent->field, field##_string[parent->field])
+#define paprf(begin, parent, field) papr(begin, typeof(*(parent)), field, "%s", strflags(parent->field, field##_string))
 
 #define paprc wprintw(parsewin, ", ")
 #define papre wprintw(parsewin, "\n")
@@ -257,14 +259,17 @@ static void parse(void) {
     wcolor_set(parsewin, header_color, NULL);
     wprintw(parsewin, "nlmsghdr: ");
 
-    papr(p->begin, struct nlmsghdr, nlmsg_len, "%u", p->h->nlmsg_len);
+    papru(p->begin, p->h, nlmsg_len);
     paprc;
-    papr(p->begin, struct nlmsghdr, nlmsg_type, "%u (%s)",
-      p->h->nlmsg_type, nlmsg_type_string[p->h->nlmsg_type]);
+    papren(p->begin, p->h, nlmsg_type);
     paprc;
     papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s",
       strflags(p->h->nlmsg_flags, (p->h->nlmsg_type & 0x1) ? nlmsg_flags_string_basic
 	: ((p->h->nlmsg_type & 0x2) ? nlmsg_flags_string_get : nlmsg_flags_string_new)));
+    papre;
+    paprx(p->begin, p->h, nlmsg_seq);
+    paprc;
+    papru(p->begin, p->h, nlmsg_pid);
     papre;
 
     header_color = DEFAULT_COLOR_PAIR;
@@ -314,6 +319,7 @@ static void parse(void) {
 	    paprc;
 	    papren(p->payload, p->rt, rtm_type);
 	    papre;
+	    paprf(p->payload, p->rt, rtm_flags);
 	    papre;
 
 	    for ( ; RTA_OK(a, alen); a = RTA_NEXT(a, alen)) {
@@ -392,6 +398,7 @@ static void parse(void) {
 		  wprintw(parsewin, "no longer used");
 		  break;
 	      }
+	      papre;
 	      papre;
 	    }
 	    break;
