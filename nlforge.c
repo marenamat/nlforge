@@ -1,4 +1,5 @@
 #define DEBUG
+#define DEBUGWIDTH 60
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -127,9 +128,9 @@ static void color_init()
   }
 }
 
-#define status(...) do { werase(statuswin); wprintw(statuswin, __VA_ARGS__); wrefresh(statuswin); refresh(); } while(0)
+#define status(...) do { werase(statuswin); wprintw(statuswin, __VA_ARGS__); wrefresh(statuswin); } while(0)
 #ifdef DEBUG
-#define debug(...) do { wprintw(debugwin, __VA_ARGS__); wprintw(debugwin, "\n"); wrefresh(debugwin); refresh(); } while(0)
+#define debug(...) do { wprintw(debugwin, __VA_ARGS__); wprintw(debugwin, "\n"); wrefresh(debugwin); } while(0)
 #else
 #define debug(...) do { __VA_ARGS__; } while (0)
 #endif
@@ -205,7 +206,11 @@ static void hexwin_cursor_to_scroll(void) {
 }
 
 static void parse_init(void) {
+#ifdef DEBUG
+  parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 4 + DEBUGWIDTH), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 3));
+#else
   parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 4), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 3));
+#endif
   wrefresh(parsewin);
 }
 
@@ -247,7 +252,7 @@ static void parse(void) {
 
   werase(parsewin);
 
-  for (int i = 0; i < datasize; ) {
+  for (int i = 0; i < datasize; parsed_cnt++) {
     parsed[parsed_cnt].h = (void *)(data + i);
     struct p *p = &(parsed[parsed_cnt]);
     p->begin = i;
@@ -467,6 +472,7 @@ static void parse(void) {
 
     i = p->end;
   }
+
 parsend:
   wrefresh(parsewin);
 }
@@ -480,8 +486,9 @@ static void menu_init(void) {
   wrefresh(menuwin);
 }
 
+
 static void debug_init(void) {
-  debugwin = newwin(LINES-2, 60, 1, COLS-60);
+  debugwin = newwin(LINES-2, DEBUGWIDTH, 1, COLS-DEBUGWIDTH);
   scrollok(debugwin, TRUE);
   idlok(debugwin, TRUE);
   if (has_colors())
@@ -530,6 +537,7 @@ static char *status_write(const char *msg) {
   }
 
   curs_set(0);
+  return "";
 }
 
 static void save_data(void) {
@@ -861,6 +869,60 @@ control:
 	  hexwin_cursor = datasize;
 	hexwin_scroll_to_cursor();
 	break;
+      case KEY_DC:
+	if (hexwin_cursor >= datasize)
+	  break;
+
+	if (hexwin_cursor < datasize-1)
+	  memmove(data + hexwin_cursor, data + hexwin_cursor + 1, datasize - hexwin_cursor - 1);
+	datasize--;
+	break;
+      case KEY_BACKSPACE:
+	if (hexwin_cursor == 0)
+	  break;
+
+	if (hexwin_cursor < datasize)
+	  memmove(data + hexwin_cursor - 1, data + hexwin_cursor, datasize - hexwin_cursor);
+	datasize--;
+	hexwin_cursor--;
+	break;
+      case KEY_SDC:
+	if (!datasize || !parsed_cnt)
+	  break;
+	if (hexwin_cursor >= parsed[parsed_cnt-1].end) {
+	  hexwin_cursor = parsed[parsed_cnt-1].end;
+	  datasize = hexwin_cursor;
+	} else {
+	  int c;
+	  if (hexwin_cursor < parsed[0].end)
+	    c = 0;
+	  else if (hexwin_cursor >= parsed[parsed_cnt-1].begin)
+	    c = parsed_cnt - 1;
+	  else {
+	    int l = 0, r = parsed_cnt-1;
+	    while (1) {
+	      c = (l + r)/2;
+	      if ((hexwin_cursor >= parsed[c].begin) && (hexwin_cursor < parsed[c].end))
+		break;
+	      else {
+		if (l == r) {
+		  status("Something strange in parser, couldn't find the right nlmsg to delete.");
+		  break;
+		}
+		if (hexwin_cursor < parsed[c].begin)
+		  r = c;
+		if (hexwin_cursor >= parsed[c].end)
+		  l = c;
+	      }
+	    }
+	  }
+	  debug("moving %d bytes to (data + %d) from (data + %d)", datasize - parsed[c].end, parsed[c].begin, parsed[c].end);
+	  memmove(data + parsed[c].begin, data + parsed[c].end, datasize - parsed[c].end);
+	  datasize -= (parsed[c].end - parsed[c].begin);
+	  hexwin_cursor = parsed[c].begin;
+	}
+	hexwin_scroll_to_cursor();
+	break;
       case KEY_F(1):
 	datasize = 0;
 	hexwin_scroll_to_cursor();
@@ -874,6 +936,8 @@ control:
       case KEY_F(8):
 	intercept_ip();
 	break;
+      default:
+	debug("Unknown key 0%o (%s)", ch, keyname(ch));
     }
 
     if (((ch >= '0') && (ch <= '9'))
