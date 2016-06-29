@@ -1,4 +1,4 @@
-//#define DEBUG
+#define DEBUG
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -29,8 +29,8 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 static u8 *data;
-static int datasize = 0;
-static int bufsize = 0;
+static u64 datasize = 0;
+static u64 bufsize = 0;
 
 static void data_realloc(void) {
   u8 *tmp = malloc(bufsize * 2);
@@ -42,7 +42,7 @@ static void data_realloc(void) {
 
 static struct p {
   struct nlmsghdr *h;
-  int begin, payload, end;
+  u64 begin, payload, end;
   union {
     struct { // RTM_*LINK
       struct ifinfomsg *link;
@@ -215,9 +215,15 @@ static void parse_init(void) {
 
 #define papr(begin, type, field, format, ...) \
   do { \
+    if (begin + offsetof(type, field) > datasize) { \
+      wprintw(parsewin, "\nPremature end of data\n"); \
+      debug("premature"); \
+      goto parsend; \
+    } \
     if (isat(begin, type, field)) { \
       wcolor_set(parsewin, PHF_COLOR_PAIR, NULL); \
       wprintw(parsewin, #field " = " format, __VA_ARGS__); \
+      debug("%s", #field " = " format); \
       wcolor_set(parsewin, header_color, NULL); \
     } else { \
       wprintw(parsewin, #field " = " format, __VA_ARGS__); \
@@ -248,6 +254,16 @@ static void parse(void) {
     p->payload = p->begin + ((u8 *)NLMSG_DATA(p->h) - (data + i));
     p->end = p->begin + NLMSG_ALIGN(p->h->nlmsg_len);
 
+    if (p->end <= p->begin + sizeof(struct nlmsghdr) + sizeof(struct rtgenmsg)) {
+      wprintw(parsewin, "nlmsghdr len too short");
+      goto parsend;
+    }
+
+    if (p->h->nlmsg_len != NLMSG_ALIGN(p->h->nlmsg_len)) {
+      wprintw(parsewin, "unaligned size, given 0x%x, should be 0x%x", p->h->nlmsg_len, NLMSG_ALIGN(p->h->nlmsg_len));
+      goto parsend;
+    }
+
     int in_header = (hexwin_cursor < p->payload) && (hexwin_cursor >= p->begin);
     int in_data = (hexwin_cursor < p->end) && (hexwin_cursor >= p->payload);
 
@@ -258,7 +274,6 @@ static void parse(void) {
 
     wcolor_set(parsewin, header_color, NULL);
     wprintw(parsewin, "nlmsghdr: ");
-
     papru(p->begin, p->h, nlmsg_len);
     paprc;
     papren(p->begin, p->h, nlmsg_type);
@@ -350,7 +365,7 @@ static void parse(void) {
 			char buf[128];
 			if (inet_ntop(p->rt->rtm_family, RTA_DATA(a), buf, 128) == NULL) {
 			  status("inet_ntop: %m");
-			  return;
+			  goto parsend;
 			}
 			wprintw(parsewin, "%s", buf);
 		      }
@@ -452,6 +467,7 @@ static void parse(void) {
 
     i = p->end;
   }
+parsend:
   wrefresh(parsewin);
 }
 
