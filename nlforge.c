@@ -23,7 +23,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define BUFSIZESTEP 4096
+#define BUFSIZESTEP	16384
+#define BUFSIZEPADDING	4096
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -34,6 +35,9 @@ static u64 datasize = 0;
 static u64 bufsize = 0;
 
 static void data_realloc(void) {
+  if (datasize + BUFSIZEPADDING < bufsize)
+    return;
+
   u8 *tmp = malloc(bufsize * 2);
   memcpy(tmp, data, bufsize);
   free(data);
@@ -220,19 +224,21 @@ static void parse_init(void) {
 
 #define papr(begin, type, field, format, ...) \
   do { \
-    if (begin + offsetof(type, field) > datasize) { \
+    int overflow = (begin + offsetof(type, field) + sizeof(((type *) NULL)->field) - datasize); \
+    if (isat(begin, type, field)) { \
+      wcolor_set(parsewin, PHF_COLOR_PAIR, NULL); \
+      if (overflow > 0) \
+	memset(data + datasize, 0, overflow); \
+      wprintw(parsewin, #field " = " format, __VA_ARGS__); \
+      if (overflow > 0) \
+	wprintw(parsewin, " (truncated)"); \
+      wcolor_set(parsewin, header_color, NULL); \
+    } else if (overflow > 0) { \
       wprintw(parsewin, "\nPremature end of data\n"); \
       debug("premature"); \
       goto parsend; \
-    } \
-    if (isat(begin, type, field)) { \
-      wcolor_set(parsewin, PHF_COLOR_PAIR, NULL); \
+    } else \
       wprintw(parsewin, #field " = " format, __VA_ARGS__); \
-      debug("%s", #field " = " format); \
-      wcolor_set(parsewin, header_color, NULL); \
-    } else { \
-      wprintw(parsewin, #field " = " format, __VA_ARGS__); \
-    } \
   } while (0)
 #define papru(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u", parent->field)
 #define paprx(begin, parent, field) papr(begin, typeof(*(parent)), field, "0x%x", parent->field)
@@ -590,8 +596,7 @@ static void send_to_kernel(void) {
     pos += sz;
   }
 
-  if (bufsize - datasize < 1024)
-    data_realloc();
+  data_realloc();
 
   ssize_t sz = recv(sk, data + datasize, bufsize - datasize, 0);
   if (sz < 0) {
@@ -742,8 +747,7 @@ static void intercept_ip(void) {
 
       debug("read netlink: %d", n);
       datasize += n;
-      if (datasize == bufsize)
-	data_realloc();
+      data_realloc();
     }
 
     if (pfd[1].revents & POLLIN) {
@@ -971,8 +975,7 @@ control:
 
       debug("val is 0x%x, go is %d, datasize is %d", val, go, datasize);
 
-      if (hexwin_cursor == bufsize)
-	data_realloc();
+      data_realloc();
 
       if (hexwin_cursor == datasize)
 	datasize++;
