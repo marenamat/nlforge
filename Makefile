@@ -1,3 +1,5 @@
+.PHONY: all clean
+
 all: nlforge interceptor.so
 
 nlforge: nlforge.c nlstrings.h
@@ -6,4 +8,5 @@ nlforge: nlforge.c nlstrings.h
 interceptor.so: interceptor.c
 	$(CC) -fPIC -shared -o $@ $< -ldl
 
-.PHONY: all
+clean:
+	rm -f nlforge interceptor.so core
