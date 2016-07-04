@@ -180,6 +180,13 @@ const char * const rta_type_string[] = {
   STR(RTA_EXPIRES),
 };
 
+const char * const rtnh_flags_string[] = {
+  FLSTR(RTNH_F_DEAD),
+  FLSTR(RTNH_F_PERVASIVE),
+  FLSTR(RTNH_F_ONLINK),
+  FLSTR(RTNH_F_OFFLOAD),
+  FLSTR(RTNH_F_LINKDOWN),
+};
 
 #define NLMSG_FLAGS_STRING_BASIC FLSTR(NLM_F_REQUEST), FLSTR(NLM_F_MULTI), FLSTR(NLM_F_ACK), FLSTR(NLM_F_ECHO), FLSTR(NLM_F_DUMP_INTR), FLSTR(NLM_F_DUMP_FILTERED)
 #define NLMSG_FLAGS_STRING_GET FLSTR(NLM_F_ROOT), FLSTR(NLM_F_MATCH), FLSTR(NLM_F_ATOMIC)
@@ -218,6 +225,9 @@ static inline const char const *_strflags(u32 flags, const char * const def[], i
 	pos += strlen("(unknown)");
       }
     }
+
+  if (pos == 0)
+    return "(none)";
 
   out[pos] = 0;
   return out;

@@ -45,32 +45,40 @@ static void data_realloc(void) {
   data = tmp;
 }
 
-static struct p {
+struct rtnexthop_parsed {
+  struct rtnexthop *rtnh;
+  u64 begin, payload, end;
+  u16 rta_cnt;
+  struct rta_parsed *rta;
+};
+
+struct rta_parsed {
+  struct rtattr *a;
+  u64 begin, payload, end;
+  union {
+    u8  *pu8;
+    u16 *pu16;
+    u32 *pu32;
+    u64 *pu64;
+    void *data;
+  };
+};
+
+static struct nlmsg_parsed {
   struct nlmsghdr *h;
   u64 begin, payload, end;
   union {
-    struct { // RTM_*LINK
-      struct ifinfomsg *link;
-    };
-    struct { // RTM_*ADDR
-      struct ifaddrmsg *addr;
-    };
-    struct { // RTM_*ROUTE
-      struct rtmsg *rt;
-    };
-    struct { // RTM_*NEIGH
-      struct ndmsg *neigh;
-    };
-    struct { // RTM_*RULE
-      struct fib_rule_hdr *rule;
-    };
-    struct { // RTM_*NEIGHTBL
-      struct ndtmst *ndt;
-    };
-    struct {
-      void *data;
-    };
+    struct nlmsgerr *err; // NLMSG_ERROR
+    struct ifinfomsg *link; // RTM_*LINK
+    struct ifaddrmsg *addr; // RTM_*ADDR
+    struct rtmsg *rt; // RTM_*ROUTE
+    struct ndmsg *neigh; // RTM_*NEIGH
+    struct fib_rule_hdr *rule; // RTM_*RULE
+    struct ndtmst *ndt; // RTM_*NEIGHTB
+    void *data;
   };
+  u16 rta_cnt;
+  struct rta_parsed *rta;
 } *parsed;
 
 #define PARSED_ALLOC_STEP 64
@@ -250,6 +258,124 @@ static void parse_init(void) {
 
 #define paprindent(n) for (int i=0; i<2*n; i++) waddch(parsewin, ' ');
 
+static int parse_rtattr(int indent, struct rtattr *a, int alen, int af) {
+  struct rta_parsed app[64] = {};
+  int rta_cnt = 0;
+
+  short header_color = DEFAULT_COLOR_PAIR;
+
+  for ( ; RTA_OK(a, alen); a = RTA_NEXT(a, alen)) {
+    struct rta_parsed *ap = &(app[rta_cnt++]);
+    ap->a = a;
+    ap->data = RTA_DATA(a);
+    ap->begin = ((u8*)a - data);
+    ap->payload = ((u8*)ap->data - data);
+    ap->end = ap->payload + RTA_PAYLOAD(a);
+
+    paprindent(indent);
+    papru(ap->begin, a, rta_len);
+    paprc;
+    papren(ap->begin, a, rta_type);
+    papre;
+
+    paprindent(indent+1);
+    wprintw(parsewin, "Value: ");
+    switch (a->rta_type) {
+      case RTA_UNSPEC:
+	break;
+      case RTA_DST:
+      case RTA_SRC:
+      case RTA_GATEWAY:
+      case RTA_PREFSRC:
+	switch (af) {
+	  case AF_INET:
+	  case AF_INET6:
+	    {
+	      char buf[128];
+	      if (inet_ntop(af, ap->data, buf, 128) == NULL) {
+		status("inet_ntop: %m");
+		goto parsend;
+	      }
+	      wprintw(parsewin, "%s", buf);
+	    }
+	    break;
+	  default:
+	    wprintw(parsewin, "Display of %s addresses not implemented yet.",
+		af_string[af]);
+	}
+	break;
+      case RTA_IIF:
+      case RTA_OIF:
+      case RTA_PRIORITY:
+      case RTA_TABLE:
+      case RTA_MARK:
+      case RTA_FLOW:
+      case RTA_PREF:
+      case RTA_ENCAP_TYPE:
+      case RTA_EXPIRES:
+	switch (RTA_PAYLOAD(a)) {
+	  case 1:
+	    wprintw(parsewin, "%u (8bit)", *ap->pu8);
+	    break;
+	  case 2:
+	    wprintw(parsewin, "%u (16bit)", *ap->pu16);
+	    break;
+	  case 4:
+	    wprintw(parsewin, "%u (32bit)", *ap->pu32);
+	    break;
+	  case 8:
+	    wprintw(parsewin, "%llu (64bit)", *ap->pu64);
+	    break;
+	  default:
+	    wprintw(parsewin, "?? (payload length %d)", RTA_PAYLOAD(a));
+	}
+	break;
+      case RTA_METRICS: // nested
+	wprintw(parsewin, "not supported yet");
+	break;
+      case RTA_MULTIPATH: // struct rtnexthop
+	papre;
+	struct rtnexthop *nh = (void *)(data + ap->payload);
+	for ( ; RTNH_OK(nh, (ap->end - ((u8*)nh - data))); nh = RTNH_NEXT(nh)) {
+	  paprindent(indent+2);
+	  int nhpos = ((u8*)nh) - data;
+	  papru(nhpos, nh, rtnh_len);
+	  paprc;
+	  paprf(nhpos, nh, rtnh_flags);
+	  paprc;
+	  papru(nhpos, nh, rtnh_hops);
+	  paprc;
+	  papru(nhpos, nh, rtnh_ifindex);
+	  papre;
+
+	  if (!parse_rtattr(indent + 3, RTNH_DATA(nh), nh->rtnh_len - RTNH_LENGTH(0), af))
+	    goto parsend;
+	}
+	papre;
+	break;
+      case RTA_CACHEINFO: // struct rta_cacheinfo
+      case RTA_MFC_STATS: // struct rta_mfc_stats
+      case RTA_VIA: // struct rtvia
+      case RTA_NEWDST: // MLPS label stack
+      case RTA_ENCAP: // nested
+	wprintw(parsewin, "not supported yet");
+	break;
+      case RTA_PROTOINFO: // no longer used
+      case RTA_SESSION: // no longer used
+      case RTA_MP_ALGO: // no longer used
+	wprintw(parsewin, "no longer used");
+	break;
+    }
+    papre;
+    papre;
+  }
+
+  return 1;
+parsend:
+  papre;
+  return 0;
+}
+
 static void parse(void) {
   free(parsed);
   parsed = malloc(sizeof(*parsed) * PARSED_ALLOC_STEP);
@@ -260,7 +386,7 @@ static void parse(void) {
 
   for (int i = 0; i < datasize; parsed_cnt++) {
     parsed[parsed_cnt].h = (void *)(data + i);
-    struct p *p = &(parsed[parsed_cnt]);
+    struct nlmsg_parsed *p = &(parsed[parsed_cnt]);
     p->begin = i;
     p->payload = p->begin + ((u8 *)NLMSG_DATA(p->h) - (data + i));
     p->end = p->begin + NLMSG_ALIGN(p->h->nlmsg_len);
@@ -308,7 +434,13 @@ static void parse(void) {
       p->data = NLMSG_DATA(p->h);
       switch (p->h->nlmsg_type) {
 	case NLMSG_NOOP:
+	  break;
 	case NLMSG_ERROR:
+	  {
+	    paprindent(1);
+	    papr(p->payload, struct nlmsgerr, error, "%u (%s)", p->err->error, strerror(p->err->error));
+	    papre;
+	  }
 	case NLMSG_DONE:
 	case NLMSG_OVERRUN:
 	case RTM_NEWLINK:
@@ -348,88 +480,12 @@ static void parse(void) {
 	    paprc;
 	    papren(p->payload, p->rt, rtm_type);
 	    papre;
+	    paprindent(1);
 	    paprf(p->payload, p->rt, rtm_flags);
 	    papre;
 
-	    for ( ; RTA_OK(a, alen); a = RTA_NEXT(a, alen)) {
-	      int apos = ((u8*)a - data);
-
-	      paprindent(2);
-	      papru(apos, a, rta_len);
-	      paprc;
-	      papren(apos, a, rta_type);
-	      papre;
-
-	      paprindent(3);
-	      wprintw(parsewin, "Value: ");
-	      switch (a->rta_type) {
-		case RTA_UNSPEC:
-		  break;
-		case RTA_DST:
-		case RTA_SRC:
-		case RTA_GATEWAY:
-		case RTA_PREFSRC:
-		  switch (p->rt->rtm_family) {
-		    case AF_INET:
-		    case AF_INET6:
-		      {
-			char buf[128];
-			if (inet_ntop(p->rt->rtm_family, RTA_DATA(a), buf, 128) == NULL) {
-			  status("inet_ntop: %m");
-			  goto parsend;
-			}
-			wprintw(parsewin, "%s", buf);
-		      }
-		      break;
-		    default:
-		      wprintw(parsewin, "Display of %s addresses not implemented yet.",
-			  af_string[p->rt->rtm_family]);
-		  }
-		  break;
-		case RTA_IIF:
-		case RTA_OIF:
-		case RTA_PRIORITY:
-		case RTA_TABLE:
-		case RTA_MARK:
-		case RTA_FLOW:
-		case RTA_PREF:
-		case RTA_ENCAP_TYPE:
-		case RTA_EXPIRES:
-		  switch (RTA_PAYLOAD(a)) {
-		    case 1:
-		      wprintw(parsewin, "%u (8bit)", *((u8 *) RTA_DATA(a)));
-		      break;
-		    case 2:
-		      wprintw(parsewin, "%u (16bit)", *((u16 *) RTA_DATA(a)));
-		      break;
-		    case 4:
-		      wprintw(parsewin, "%u (32bit)", *((u32 *) RTA_DATA(a)));
-		      break;
-		    case 8:
-		      wprintw(parsewin, "%llu (64bit)", *((u64 *) RTA_DATA(a)));
-		      break;
-		    default:
-		      wprintw(parsewin, "?? (payload length %d)", RTA_PAYLOAD(a));
-		  }
-		  break;
-		case RTA_METRICS: // nested
-		case RTA_MULTIPATH: // struct rtnexthop
-		case RTA_CACHEINFO: // struct rta_cacheinfo
-		case RTA_MFC_STATS: // struct rta_mfc_stats
-		case RTA_VIA: // struct rtvia
-		case RTA_NEWDST: // MLPS label stack
-		case RTA_ENCAP: // nested
-		  wprintw(parsewin, "not supported yet");
-		  break;
-		case RTA_PROTOINFO: // no longer used
-		case RTA_SESSION: // no longer used
-		case RTA_MP_ALGO: // no longer used
-		  wprintw(parsewin, "no longer used");
-		  break;
-	      }
-	      papre;
-	      papre;
-	    }
+	    if (!parse_rtattr(2, a, alen, p->rt->rtm_family))
+	      goto parsend;
 	    break;
 	  }
 	case RTM_NEWNEIGH:
