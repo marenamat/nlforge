@@ -158,6 +158,11 @@ static void status_init()
 static int hexwin_offset = 0;
 static int hexwin_cursor = 0;
 
+#define winpos	(hexwin_cursor - hexwin_offset*BYTES_PER_LINE)
+#define winy	(winpos / BYTES_PER_LINE + 1)
+#define winx_	(winpos % BYTES_PER_LINE)
+#define winx	(winx_*3+1 + winx_/BYTES_GROUP_BY)
+
 #define BYTES_PER_LINE		16
 #define BYTES_GROUP_BY		4
 #define HEXWIN_LINES		(LINES-5)
@@ -1003,9 +1008,6 @@ control:
     if (((ch >= '0') && (ch <= '9'))
      || ((ch >= 'A') && (ch <= 'F'))
      || ((ch >= 'a') && (ch <= 'f'))) {
-      int winpos = hexwin_cursor - hexwin_offset*BYTES_PER_LINE;
-      int winy = winpos / BYTES_PER_LINE + 1;
-      int winx = winpos % BYTES_PER_LINE; winx = winx*3+1 + winx/BYTES_GROUP_BY;
 
       mvwaddch(hexwin, winy, winx, ch | COLOR_PAIR(CURSOR_COLOR_PAIR) | A_BOLD);
       wrefresh(hexwin);
