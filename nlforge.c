@@ -23,6 +23,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define SPACE_8   "        "
+#define SPACE_32  SPACE_8  SPACE_8  SPACE_8  SPACE_8
+#define SPACE_128 SPACE_32 SPACE_32 SPACE_32 SPACE_32
+
+#define SPACES(x) (&(SPACE_128)[128 - (x)])
+
 #define BUFSIZESTEP	16384
 #define BUFSIZEPADDING	4096
 
@@ -45,12 +51,18 @@ static void data_realloc(void) {
   data = tmp;
 }
 
-struct rtnexthop_parsed {
-  struct rtnexthop *rtnh;
-  u64 begin, payload, end;
-  u16 rta_cnt;
-  struct rta_parsed *rta;
-};
+static struct {
+  u16 max_index;
+  u8 size;
+  const char * const *strings;
+  union {
+    u8  *pu8;
+    u16 *pu16;
+    u32 *pu32;
+    u64 *pu64;
+    void *data;
+  };
+} enum_info;
 
 struct rta_parsed {
   struct rtattr *a;
@@ -77,8 +89,6 @@ static struct nlmsg_parsed {
     struct ndtmst *ndt; // RTM_*NEIGHTB
     void *data;
   };
-  u16 rta_cnt;
-  struct rta_parsed *rta;
 } *parsed;
 
 #define PARSED_ALLOC_STEP 64
@@ -101,6 +111,8 @@ static WINDOW *debugwin;
   C(PH1, COLOR_BLACK, COLOR_GREEN, 0, 0, 0, 700, 1000, 700) \
   C(PH2, COLOR_WHITE, COLOR_BLUE, 0, 0, 0, 700, 700, 1000) \
   C(MENU, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 700) \
+  C(ENUM_NORMAL, COLOR_BLACK, COLOR_WHITE, 0, 0, 0, 700, 700, 1000) \
+  C(ENUM_CHOSEN, COLOR_BLACK, COLOR_YELLOW, 0, 0, 0, 400, 400, 1000) \
   C(DEBUG, COLOR_WHITE, COLOR_RED, 0, 0, 300, 1000, 700, 700) \
 
 
@@ -166,12 +178,13 @@ static int hexwin_cursor = 0;
 #define BYTES_PER_LINE		16
 #define BYTES_GROUP_BY		4
 #define HEXWIN_LINES		(LINES-5)
+#define HEXWIN_COLS		(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY)
 #define PGSKIP			16
 #define BYTES_PER_SCREEN	(BYTES_PER_LINE*HEXWIN_LINES)
 
 static void hexwin_init(void)
 {
-  hexwin = newwin(HEXWIN_LINES+2, BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY, 2, 0);
+  hexwin = newwin(HEXWIN_LINES+2, HEXWIN_COLS, 2, 0);
   box(hexwin, 0, 0);
   wrefresh(hexwin);
 }
@@ -224,9 +237,9 @@ static void hexwin_cursor_to_scroll(void) {
 
 static void parse_init(void) {
 #ifdef DEBUG
-  parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 4 + DEBUGWIDTH), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 3));
+  parsewin = newwin(LINES-3, COLS - (HEXWIN_COLS + 4 + DEBUGWIDTH), 3, (HEXWIN_COLS + 3));
 #else
-  parsewin = newwin(LINES-3, COLS-(BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 4), 3, (BYTES_PER_LINE*3 + BYTES_PER_LINE/BYTES_GROUP_BY + 3));
+  parsewin = newwin(LINES-3, COLS - (HEXWIN_COLS + 4), 3, (HEXWIN_COLS + 3));
 #endif
   wrefresh(parsewin);
 }
@@ -255,7 +268,17 @@ static void parse_init(void) {
   } while (0)
 #define papru(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u", parent->field)
 #define paprx(begin, parent, field) papr(begin, typeof(*(parent)), field, "0x%x", parent->field)
-#define papren(begin, parent, field) papr(begin, typeof(*(parent)), field, "%u (%s)", parent->field, parent->field >= (sizeof(field##_string)/sizeof(*field##_string)) ? "out of scope" : field##_string[parent->field])
+#define papren(begin, parent, field) \
+  do { \
+    papr(begin, typeof(*(parent)), field, "%u (%s)", parent->field, parent->field >= (sizeof(field##_string)/sizeof(*field##_string)) ? "out of scope" : field##_string[parent->field]); \
+    if (isat(begin, typeof(*(parent)), field)) { \
+      enum_info.size = sizeof(parent->field); \
+      enum_info.max_index = (sizeof(field##_string)/sizeof(*field##_string)); \
+      enum_info.strings = field##_string; \
+      enum_info.data = &(parent->field); \
+    } \
+  } while (0)
+
 #define paprf(begin, parent, field) papr(begin, typeof(*(parent)), field, "%s", strflags(parent->field, field##_string))
 
 #define paprc wprintw(parsewin, ", ")
@@ -264,13 +287,14 @@ static void parse_init(void) {
 #define paprindent(n) for (int i=0; i<2*n; i++) waddch(parsewin, ' ');
 
 static int parse_rtattr(int indent, struct rtattr *a, int alen, int af) {
-  struct rta_parsed app[64] = {};
+  struct rta_parsed as;
   int rta_cnt = 0;
 
   short header_color = DEFAULT_COLOR_PAIR;
 
   for ( ; RTA_OK(a, alen); a = RTA_NEXT(a, alen)) {
-    struct rta_parsed *ap = &(app[rta_cnt++]);
+    struct rta_parsed *ap = &as;
+    bzero(ap, sizeof(*ap));
     ap->a = a;
     ap->data = RTA_DATA(a);
     ap->begin = ((u8*)a - data);
@@ -386,6 +410,8 @@ static void parse(void) {
   parsed = malloc(sizeof(*parsed) * PARSED_ALLOC_STEP);
   parsed_cnt = 0;
   parsed_max = PARSED_ALLOC_STEP;
+
+  bzero(&enum_info, sizeof(enum_info));
 
   werase(parsewin);
 
@@ -549,7 +575,7 @@ static void menu_init(void) {
   if (has_colors())
     wcolor_set(menuwin, MENU_COLOR_PAIR, NULL);
 
-  wprintw(menuwin, "F1 new file    F2 save file    F5 send to kernel    F8 intercept ip    F10/q quit");
+  wprintw(menuwin, "F1 new file    F2 save file    F5 enum choose    F7 send to kernel    F8 intercept ip    F10/q quit");
   wrefresh(menuwin);
 }
 
@@ -639,6 +665,149 @@ fin:
     status("File not saved: %s", res);
   else
     status("File saved as \"%s\"", filename);
+}
+
+#define ENUM_CHOOSER_SIZE   10
+
+static void enum_choose(void) {
+  if (enum_info.size == 0) {
+    status("No enum at cursor");
+    return;
+  }
+
+  int wl, wr, wt, wb;
+
+  u64 current_value = 0;
+  switch (enum_info.size) {
+    case 1:
+      current_value = *(enum_info.pu8);
+      break;
+    case 2:
+      current_value = *(enum_info.pu16);
+      break;
+    case 4:
+      current_value = *(enum_info.pu32);
+      break;
+    case 8:
+      current_value = *(enum_info.pu64);
+      break;
+    default:
+      status("Strange size of enum");
+      return;
+  }
+
+  int enum_height = 0;
+  int enum_width = 0;
+  int enum_num = 0;
+  int enum_pos = 0;
+  int enum_scroll = 0;
+
+  for (int i=0; i<enum_info.max_index; i++)
+    if (enum_info.strings[i]) {
+      int l = strlen(enum_info.strings[i]);
+      if (l > enum_width)
+	enum_width = l;
+
+      if (i == current_value)
+	enum_pos = enum_num;
+      enum_num++;
+    }
+
+  if (enum_num >= ENUM_CHOOSER_SIZE) {
+    enum_height = ENUM_CHOOSER_SIZE;
+    enum_scroll = (ENUM_CHOOSER_SIZE/2) * ((enum_pos - (ENUM_CHOOSER_SIZE/4)) / (ENUM_CHOOSER_SIZE/2));
+  } else
+    enum_height = enum_num;
+
+  if (winy + 3 + enum_height >= LINES) {
+    wb = winy + 2;
+    wt = wb - enum_height;
+  } else {
+    wt = winy + 3;
+    wb = wt + enum_height;
+  }
+
+  u32 enum_val[enum_num];
+
+  for (int i=0, j=0; i<enum_info.max_index; i++)
+    if (enum_info.strings[i])
+      enum_val[j++] = i;
+
+  if (winx < enum_width/2) {
+    wl = 0;
+    wr = enum_width;
+  } else if (winx > HEXWIN_COLS - enum_width/2) {
+    wr = HEXWIN_COLS-1;
+    wl = wr - enum_width;
+  } else {
+    wl = winx - enum_width/2;
+    wr = wl + enum_width;
+  }
+
+  WINDOW *enumwin = newwin((wb - wt), (wr - wl), wt, wl);
+
+  while (1) {
+    werase(enumwin);
+    for (int i=0; i<enum_height; i++) {
+      if (has_colors())
+	if (enum_pos == enum_scroll + i)
+	  wcolor_set(enumwin, ENUM_CHOSEN_COLOR_PAIR, NULL);
+	else
+	  wcolor_set(enumwin, ENUM_NORMAL_COLOR_PAIR, NULL);
+
+      wprintw(enumwin, "%s", enum_info.strings[enum_val[i + enum_scroll]]);
+      wprintw(enumwin, "%s", SPACES(enum_width - strlen(enum_info.strings[enum_val[i + enum_scroll]])));
+    }
+
+    wrefresh(enumwin);
+    int ch = xgetch();
+
+    if (ch == KEY_ENTER || ch == 0xa || ch == 0xd) {
+      switch (enum_info.size) {
+	case 1:
+	  *(enum_info.pu8) = enum_val[enum_pos];
+	  break;
+	case 2:
+	  *(enum_info.pu16) = enum_val[enum_pos];
+	  break;
+	case 4:
+	  *(enum_info.pu32) = enum_val[enum_pos];
+	  break;
+	case 8:
+	  *(enum_info.pu64) = enum_val[enum_pos];
+	  break;
+      }
+      if (datasize < (enum_info.pu8 - data) + enum_info.size) {
+	data_realloc();
+	datasize = (enum_info.pu8 - data) + enum_info.size;
+      }
+      delwin(enumwin);
+      return;
+    }
+
+    switch (ch) {
+      case KEY_UP:
+	if (enum_pos > 0)
+	  enum_pos--;
+	if ((enum_scroll > 0) && (enum_pos - enum_scroll < enum_height/4))
+	{
+	  enum_scroll -= enum_height/4;
+	  if (enum_scroll < 0)
+	    enum_scroll = 0;
+	}
+	break;
+      case KEY_DOWN:
+	if (enum_pos < enum_num-1)
+	  enum_pos++;
+	if ((enum_scroll + enum_height < enum_num) && (enum_pos - enum_scroll + enum_height/4 >= enum_height))
+	{
+	  enum_scroll += enum_height/4;
+	  if (enum_scroll + enum_height > enum_num)
+	    enum_scroll = enum_num - enum_height;
+	}
+	break;
+    }
+  }
 }
 
 static void send_to_kernel(void) {
@@ -996,6 +1165,9 @@ control:
 	save_data();
 	break;
       case KEY_F(5):
+	enum_choose();
+	break;
+      case KEY_F(7):
 	send_to_kernel();
 	break;
       case KEY_F(8):
