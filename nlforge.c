@@ -51,9 +51,12 @@ static void data_realloc(void) {
   data = tmp;
 }
 
+#define ENUM_INFO_ALLOW_MULTIPLE 0x1
+
 static struct {
   u16 max_index;
   u8 size;
+  u8 flags;
   const char * const *strings;
   union {
     u8  *pu8;
@@ -279,7 +282,18 @@ static void parse_init(void) {
     } \
   } while (0)
 
-#define paprf(begin, parent, field) papr(begin, typeof(*(parent)), field, "%s", strflags(parent->field, field##_string))
+#define paprf(begin, parent, field) \
+  do { \
+    papr(begin, typeof(*(parent)), field, "%s", strflags(parent->field, field##_string)); \
+    if (isat(begin, typeof(*(parent)), field)) { \
+      enum_info.size = sizeof(parent->field); \
+      enum_info.max_index = (sizeof(field##_string)/sizeof(*field##_string)); \
+      enum_info.strings = field##_string; \
+      enum_info.data = &(parent->field); \
+      enum_info.flags = ENUM_INFO_ALLOW_MULTIPLE; \
+    } \
+  } while (0)
+
 
 #define paprc wprintw(parsewin, ", ")
 #define papre wprintw(parsewin, "\n")
@@ -446,12 +460,22 @@ static void parse(void) {
     paprc;
     papren(p->begin, p->h, nlmsg_type);
     paprc;
+
     if (p->h->nlmsg_type & 0x1)
-      papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s", strflags(p->h->nlmsg_flags, nlmsg_flags_string_basic));
+#define nlmsg_flags_string nlmsg_flags_string_basic
+      paprf(p->begin, p->h, nlmsg_flags);
+#undef nlmsg_flags_string
+
     else if (p->h->nlmsg_type & 0x2)
-      papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s", strflags(p->h->nlmsg_flags, nlmsg_flags_string_get));
+#define nlmsg_flags_string nlmsg_flags_string_get
+      paprf(p->begin, p->h, nlmsg_flags);
+#undef nlmsg_flags_string
+
     else
-      papr(p->begin, struct nlmsghdr, nlmsg_flags, "%s", strflags(p->h->nlmsg_flags, nlmsg_flags_string_new));
+#define nlmsg_flags_string nlmsg_flags_string_new
+      paprf(p->begin, p->h, nlmsg_flags);
+#undef nlmsg_flags_string
+
     papre;
     paprx(p->begin, p->h, nlmsg_seq);
     paprc;
@@ -675,8 +699,6 @@ static void enum_choose(void) {
     return;
   }
 
-  int wl, wr, wt, wb;
-
   u64 current_value = 0;
   switch (enum_info.size) {
     case 1:
@@ -696,11 +718,14 @@ static void enum_choose(void) {
       return;
   }
 
+  int wl, wr, wt, wb;
+
   int enum_height = 0;
   int enum_width = 0;
   int enum_num = 0;
   int enum_pos = 0;
   int enum_scroll = 0;
+  bool enum_mul = !!(enum_info.flags & ENUM_INFO_ALLOW_MULTIPLE);
 
   for (int i=0; i<enum_info.max_index; i++)
     if (enum_info.strings[i]) {
@@ -708,10 +733,17 @@ static void enum_choose(void) {
       if (l > enum_width)
 	enum_width = l;
 
-      if (i == current_value)
+      if ((i == current_value) && !enum_mul)
 	enum_pos = enum_num;
       enum_num++;
     }
+
+#define ENUM_FLAGFIELD_ADDWIDTH	4
+
+  enum_width += 2;
+
+  if (enum_mul)
+    enum_width += ENUM_FLAGFIELD_ADDWIDTH;
 
   if (enum_num >= ENUM_CHOOSER_SIZE) {
     enum_height = ENUM_CHOOSER_SIZE;
@@ -755,8 +787,17 @@ static void enum_choose(void) {
 	else
 	  wcolor_set(enumwin, ENUM_NORMAL_COLOR_PAIR, NULL);
 
+      if (enum_mul)
+	if (current_value & (1ULL << enum_val[i + enum_scroll]))
+	  wprintw(enumwin, "[X] ");
+	else
+	  wprintw(enumwin, "[ ] ");
+
       wprintw(enumwin, "%s", enum_info.strings[enum_val[i + enum_scroll]]);
-      wprintw(enumwin, "%s", SPACES(enum_width - strlen(enum_info.strings[enum_val[i + enum_scroll]])));
+      if (enum_mul)
+	wprintw(enumwin, "%s\n", SPACES(enum_width - ENUM_FLAGFIELD_ADDWIDTH - strlen(enum_info.strings[enum_val[i + enum_scroll]]) - 1));
+      else
+	wprintw(enumwin, "%s\n", SPACES(enum_width - strlen(enum_info.strings[enum_val[i + enum_scroll]]) - 1));
     }
 
     wrefresh(enumwin);
@@ -765,16 +806,16 @@ static void enum_choose(void) {
     if (ch == KEY_ENTER || ch == 0xa || ch == 0xd) {
       switch (enum_info.size) {
 	case 1:
-	  *(enum_info.pu8) = enum_val[enum_pos];
+	  *(enum_info.pu8) = current_value;
 	  break;
 	case 2:
-	  *(enum_info.pu16) = enum_val[enum_pos];
+	  *(enum_info.pu16) = current_value;
 	  break;
 	case 4:
-	  *(enum_info.pu32) = enum_val[enum_pos];
+	  *(enum_info.pu32) = current_value;
 	  break;
 	case 8:
-	  *(enum_info.pu64) = enum_val[enum_pos];
+	  *(enum_info.pu64) = current_value;
 	  break;
       }
       if (datasize < (enum_info.pu8 - data) + enum_info.size) {
@@ -795,6 +836,8 @@ static void enum_choose(void) {
 	  if (enum_scroll < 0)
 	    enum_scroll = 0;
 	}
+	if (!enum_mul)
+	  current_value = enum_val[enum_pos];
 	break;
       case KEY_DOWN:
 	if (enum_pos < enum_num-1)
@@ -805,6 +848,12 @@ static void enum_choose(void) {
 	  if (enum_scroll + enum_height > enum_num)
 	    enum_scroll = enum_num - enum_height;
 	}
+	if (!enum_mul)
+	  current_value = enum_val[enum_pos];
+	break;
+      case ' ':
+	if (enum_mul)
+	  current_value ^= (1 << enum_val[enum_pos]);
 	break;
     }
   }
