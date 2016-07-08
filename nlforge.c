@@ -121,7 +121,7 @@ static WINDOW *debugwin;
 
 #define C(id, f, b, fr, fg, fb, br, bg, bb) id##_COLOR_PAIR,
 enum {
-  UNDEFINED_COLOR_PAIR = 0,
+  UNDEFINED_COLOR_PAIR = 64,
   MY_COLORS
   MAX_MY_COLOR_PAIR
 };
@@ -247,6 +247,40 @@ static void parse_init(void) {
   wrefresh(parsewin);
 }
 
+static const char * const addrtostr(int af, int len, const char * const data) {
+  static char buf[128];
+  int pos = 0;
+
+  switch (af) {
+    case AF_INET:
+    case AF_INET6:
+      if (inet_ntop(af, data, buf, 128) == NULL) {
+	status("inet_ntop: %m");
+	return NULL;
+      }
+      return buf;
+    case AF_MPLS:
+      for (int i=0; i<len; i += 4) {
+	if (i)
+	  pos += sprintf(buf + pos, " / ");
+	else
+	  pos += sprintf(buf + pos, "MPLS label stack ");
+
+	u32 lbl = ntohl(*((u32*)(data + i)));
+	pos += sprintf(buf + pos, "%u", lbl >> 12);
+
+	if (lbl & 0x100)
+	  pos += sprintf(buf + pos, " (bos)");
+	if (lbl & 0xff)
+	  pos += sprintf(buf + pos, " (lsb %02x)");
+      }
+      return buf;
+    default:
+      sprintf(buf, "Display od %s addresses not implemented yet.", af_string[af]);
+      return buf;
+  }
+}
+
 #define isat(begin, type, field) \
      ((hexwin_cursor >= (begin + offsetof(type, field))) \
    && (hexwin_cursor < begin + offsetof(type, field) + sizeof(((type *) NULL)->field)))
@@ -330,23 +364,14 @@ static int parse_rtattr(int indent, struct rtattr *a, int alen, int af) {
       case RTA_SRC:
       case RTA_GATEWAY:
       case RTA_PREFSRC:
-	switch (af) {
-	  case AF_INET:
-	  case AF_INET6:
-	    {
-	      char buf[128];
-	      if (inet_ntop(af, ap->data, buf, 128) == NULL) {
-		status("inet_ntop: %m");
-		goto parsend;
-	      }
-	      wprintw(parsewin, "%s", buf);
-	    }
-	    break;
-	  default:
-	    wprintw(parsewin, "Display of %s addresses not implemented yet.",
-		af_string[af]);
+      case RTA_NEWDST: // MLPS label stack
+	{
+	  const char * const addr = addrtostr(af, RTA_PAYLOAD(a), ap->data);
+	  if (addr == NULL)
+	    goto parsend;
+	  wprintw(parsewin, "%s", addr);
+	  break;
 	}
-	break;
       case RTA_IIF:
       case RTA_OIF:
       case RTA_PRIORITY:
@@ -398,8 +423,20 @@ static int parse_rtattr(int indent, struct rtattr *a, int alen, int af) {
 	break;
       case RTA_CACHEINFO: // struct rta_cacheinfo
       case RTA_MFC_STATS: // struct rta_mfc_stats
+	wprintw(parsewin, "not supported yet");
+	break;
       case RTA_VIA: // struct rtvia
-      case RTA_NEWDST: // MLPS label stack
+	{
+	  struct rtvia *rtvia = (void *)(data + ap->payload);
+	  papren(ap->payload, rtvia, rtvia_family);
+	  const char * const addr = addrtostr(rtvia->rtvia_family, RTA_PAYLOAD(a) - sizeof(rtvia->rtvia_family), rtvia->rtvia_addr);
+	  paprc;
+	  if (addr == NULL)
+	    goto parsend;
+	  wprintw(parsewin, "%s", addr);
+	  break;
+	}
+	break;
       case RTA_ENCAP: // nested
 	wprintw(parsewin, "not supported yet");
 	break;
