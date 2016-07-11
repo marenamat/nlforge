@@ -11,6 +11,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <ncurses.h>
+#include <pcap/pcap.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,27 +30,10 @@
 
 #define SPACES(x) (&(SPACE_128)[128 - (x)])
 
-#define BUFSIZESTEP	16384
-#define BUFSIZEPADDING	4096
-
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
-static u8 *data;
-static u64 datasize = 0;
-static u64 bufsize = 0;
-
-static void data_realloc(void) {
-  if (datasize + BUFSIZEPADDING < bufsize)
-    return;
-
-  u8 *tmp = malloc(bufsize * 2);
-  memcpy(tmp, data, bufsize);
-  free(data);
-  bufsize *= 2;
-  data = tmp;
-}
 
 #define ENUM_INFO_ALLOW_MULTIPLE 0x1
 
@@ -121,7 +105,7 @@ static WINDOW *debugwin;
 
 #define C(id, f, b, fr, fg, fb, br, bg, bb) id##_COLOR_PAIR,
 enum {
-  UNDEFINED_COLOR_PAIR = 64,
+  START_COLOR_PAIRS = 128,
   MY_COLORS
   MAX_MY_COLOR_PAIR
 };
@@ -129,20 +113,23 @@ enum {
 
 #define C(id, f, b, fr, fg, fb, br, bg, bb) id##_COLOR_FOREGROUND, id##_COLOR_BACKGROUND,
 enum {
-  UNDEFINED_MY_COLOR = 64,
+  START_COLORS = 128,
   MY_COLORS
   MAX_MY_COLOR
 };
 #undef C
 
+short oldrgb[MAX_MY_COLOR][3];
 
-static void color_init()
+static void color_init(void)
 {
   if (!has_colors())
     return;
 
   if (can_change_color()) {
 #define C(id, f, b, fr, fg, fb, br, bg, bb) \
+    color_content(id##_COLOR_FOREGROUND, &oldrgb[id##_COLOR_FOREGROUND][0], &oldrgb[id##_COLOR_FOREGROUND][1], &oldrgb[id##_COLOR_FOREGROUND][2]); \
+    color_content(id##_COLOR_BACKGROUND, &oldrgb[id##_COLOR_BACKGROUND][0], &oldrgb[id##_COLOR_BACKGROUND][1], &oldrgb[id##_COLOR_BACKGROUND][2]); \
     init_color(id##_COLOR_FOREGROUND, fr, fg, fb); \
     init_color(id##_COLOR_BACKGROUND, br, bg, bb); \
     init_pair(id##_COLOR_PAIR, id##_COLOR_FOREGROUND, id##_COLOR_BACKGROUND);
@@ -155,6 +142,18 @@ static void color_init()
   }
 }
 
+static void color_fini(void)
+{
+  if (!has_colors() || !can_change_color())
+    return;
+
+#define C(id, f, b, fr, fg, fb, br, bg, bb) \
+  init_color(id##_COLOR_FOREGROUND, oldrgb[id##_COLOR_FOREGROUND][0], oldrgb[id##_COLOR_FOREGROUND][1], oldrgb[id##_COLOR_FOREGROUND][2]); \
+  init_color(id##_COLOR_BACKGROUND, oldrgb[id##_COLOR_BACKGROUND][0], oldrgb[id##_COLOR_BACKGROUND][1], oldrgb[id##_COLOR_BACKGROUND][2]);
+  MY_COLORS
+#undef C
+}
+
 #define status(...) do { werase(statuswin); wprintw(statuswin, __VA_ARGS__); wrefresh(statuswin); } while(0)
 #ifdef DEBUG
 #define debug(...) do { wprintw(debugwin, __VA_ARGS__); wprintw(debugwin, "\n"); wrefresh(debugwin); } while(0)
@@ -162,7 +161,27 @@ static void color_init()
 #define debug(...) do { __VA_ARGS__; } while (0)
 #endif
 
-static void status_init()
+#define BUFSIZESTEP	16384
+#define BUFSIZEPADDING	4096
+
+static u8 *data;
+static u64 datasize = 0;
+static u64 bufsize = 0;
+
+static void data_realloc(void) {
+  if (datasize + BUFSIZEPADDING < bufsize)
+    return;
+
+  debug("Realloc from %d to %d", bufsize, bufsize * 2);
+
+  u8 *tmp = malloc(bufsize * 2);
+  memcpy(tmp, data, datasize);
+  free(data);
+  bufsize *= 2;
+  data = tmp;
+}
+
+static void status_init(void)
 {
   statuswin = newwin(1, COLS, LINES-1, 0);
   if (has_colors())
@@ -188,6 +207,8 @@ static int hexwin_cursor = 0;
 static void hexwin_init(void)
 {
   hexwin = newwin(HEXWIN_LINES+2, HEXWIN_COLS, 2, 0);
+  if (has_colors())
+    wcolor_set(hexwin, DEFAULT_COLOR_PAIR, NULL);
   box(hexwin, 0, 0);
   wrefresh(hexwin);
 }
@@ -467,6 +488,15 @@ static void parse(void) {
   werase(parsewin);
 
   for (int i = 0; i < datasize; parsed_cnt++) {
+    if (parsed_cnt >= parsed_max) {
+      struct nlmsg_parsed *tmp = malloc(sizeof(*tmp) * parsed_max * 2);
+
+      memcpy(tmp, parsed, parsed_cnt * sizeof(*parsed));
+      parsed_max *= 2;
+
+      free(parsed);
+      parsed = tmp;
+    }
     parsed[parsed_cnt].h = (void *)(data + i);
     struct nlmsg_parsed *p = &(parsed[parsed_cnt]);
     p->begin = i;
@@ -530,7 +560,7 @@ static void parse(void) {
 	case NLMSG_ERROR:
 	  {
 	    paprindent(1);
-	    papr(p->payload, struct nlmsgerr, error, "%u (%s)", p->err->error, strerror(p->err->error));
+	    papr(p->payload, struct nlmsgerr, error, "%u (%s)", -p->err->error, strerror(-p->err->error));
 	    papre;
 	  }
 	case NLMSG_DONE:
@@ -636,7 +666,7 @@ static void menu_init(void) {
   if (has_colors())
     wcolor_set(menuwin, MENU_COLOR_PAIR, NULL);
 
-  wprintw(menuwin, "F1 new file    F2 save file    F5 enum choose    F7 send to kernel    F8 intercept ip    F10/q quit");
+  wprintw(menuwin, "F1 new file    F2 save file    F5 enum choose    F6 device capture    F7 send to kernel    F8 intercept ip    F10/q quit");
   wrefresh(menuwin);
 }
 
@@ -896,6 +926,76 @@ static void enum_choose(void) {
   }
 }
 
+struct cpi {
+  pcap_t *p;
+  int n;
+};
+
+static void capture_packets_handler(u8 *user, const struct pcap_pkthdr *h, const u8 *bytes) {
+  struct cpi *i = (void *)user;
+  if (xgetch() != ERR) {
+    status("Key pressed.");
+    pcap_breakloop(i->p);
+    return;
+  }
+
+  i->n++;
+
+  data_realloc();
+
+  memcpy(data + datasize, bytes + 16, h->len - 16); // DLT_NETLINK begins with 16-byte header
+  datasize += h->len - 16;
+
+  hexwin_redraw();
+  parse();
+  refresh();
+}
+
+static void capture_packets(void) {
+  char *ifname = status_write("Netlink capture interface: ");
+
+  char errbuf[PCAP_ERRBUF_SIZE];
+  pcap_t *p = pcap_create(ifname, errbuf);
+
+  if (!p) {
+    status("pcap_create: %s", errbuf);
+    return;
+  }
+
+  int err = pcap_activate(p);
+  if (err) {
+    status("pcap_activate: %s", pcap_geterr(p));
+    pcap_close(p);
+    return;
+  }
+
+  int linktype = pcap_datalink(p);
+  if (linktype != DLT_NETLINK) {
+    status("pcap_datalink returned %d, want DLT_NETLINK (%d)", linktype, DLT_NETLINK);
+    pcap_close(p);
+    return;
+  }
+
+  datasize = 0;
+
+  nodelay(stdscr, TRUE);
+  status("Press any key to break the packet stream.");
+
+  struct cpi i = { .p = p, .n = 0 };
+  switch(pcap_loop(p, -1, capture_packets_handler, (u8 *) &i)) {
+    case 0:
+    case -2:
+      status("Capture finished OK with %d packets", i.n);
+      break;
+    case -1:
+      status("pcap_loop: %s", pcap_geterr(p));
+      break;
+  }
+
+  nodelay(stdscr, FALSE);
+  pcap_close(p);
+}
+
 static void send_to_kernel(void) {
   int sk = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
   if (sk < 0) {
@@ -1088,7 +1188,6 @@ static void intercept_ip(void) {
   while (waitpid(pid, &wstatus, 0) < 0);
 
   status("Command done.");
-  hexwin_redraw();
 }
 
 int main(int argc, char **argv)
@@ -1152,6 +1251,9 @@ control:
       case 'q':
       case KEY_F(10):
 	endwin();
+	color_fini();
+	if (use_default_colors() == -1)
+	  fprintf(stderr, "Error resetting terminal colors");
 	return 0;
       case KEY_PPAGE:
 	hexwin_offset -= PGSKIP;
@@ -1252,6 +1354,9 @@ control:
 	break;
       case KEY_F(5):
 	enum_choose();
+	break;
+      case KEY_F(6):
+	capture_packets();
 	break;
       case KEY_F(7):
 	send_to_kernel();
