@@ -3,7 +3,7 @@
 all: nlforge interceptor.so
 
 nlforge: nlforge.c nlstrings.h
-	$(CC) -ggdb3 -lncurses -lpcap -o $@ $<
+	$(CC) -ggdb3 -o $@ $< -lncurses -lpcap
 
 interceptor.so: interceptor.c
 	$(CC) -fPIC -shared -o $@ $< -ldl
