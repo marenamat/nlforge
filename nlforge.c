@@ -1,3 +1,7 @@
+/* Netlink forge. GNU GPL 2.
+ * (c) 2016-2021 Maria Matejka <mq@jmq.cz>
+ */
+
 #define DEBUG
 #define DEBUGWIDTH 60
 #define _GNU_SOURCE

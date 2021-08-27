@@ -1,0 +1,6 @@
+NLforge is a command-line Netlink message visualizer, editor and sender, mostly
+to allow instant debugging and testing. Never finished. Handle with care. Fragile.
+
+Needs libpcap-dev and libncurses-dev.
+
+Licence: GNU GPL v2.
